@@ -119,6 +119,8 @@ $('btn-login').addEventListener('click', async () => {
   }
 });
 
+$('btn-log').addEventListener('click', () => invoke('open_log_folder').catch((e) => toast('Não abriu: ' + e)));
+
 $('btn-logout').addEventListener('click', () => {
   store.set('token', null);
   S.token = null;

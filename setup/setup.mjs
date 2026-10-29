@@ -32,11 +32,27 @@ const fail = (t) => {
   process.exit(1);
 };
 
-const rl = createInterface({ input: process.stdin, terminal: false });
-const lines = rl[Symbol.asyncIterator]();
+// No terminal, abre e FECHA a leitura a cada pergunta: assim o teclado fica
+// livre pros programas que perguntam coisas sozinhos (GitHub, Cloudflare).
+// Com entrada redirecionada (testes), usa um leitor único pra não perder linhas.
+const TTY = !!process.stdin.isTTY;
+let shared = null;
 async function readLine(prompt) {
+  if (TTY) {
+    const r = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      return await r.question(prompt);
+    } finally {
+      r.close();
+      process.stdin.pause();
+    }
+  }
+  if (!shared) {
+    const r = createInterface({ input: process.stdin, terminal: false });
+    shared = { r, it: r[Symbol.asyncIterator]() };
+  }
   process.stdout.write(prompt);
-  const { value, done } = await lines.next();
+  const { value, done } = await shared.it.next();
   if (done) fail('Entrada encerrada.');
   return value;
 }
@@ -155,6 +171,7 @@ async function publish() {
   writeFileSync(cargo, readFileSync(cargo, 'utf8').replace(/^version = ".*"$/m, `version = "${next}"`));
   await run('git', ['add', '-A']);
   await run('git', ['commit', '-q', '-m', `Versão ${next}`]);
+  await run('git', ['pull', '-q', '--rebase', '--autostash', 'origin', 'main'], { allowFail: true });
   await run('git', ['push', '-q']);
   await waitForBuild(conf.repo);
   await postWebhook(conf.webhook, `🔄 **STAR // STREAM ${next}** saiu. Quem já tem o app recebe sozinho na próxima vez que abrir.`);
@@ -224,8 +241,18 @@ async function setup() {
   setTomlVar('GUILD_ID', conf.guildId);
   setTomlVar('GITHUB_REPO', conf.repo);
   await run('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: SIGNAL });
-  info('Se a Cloudflare pedir um nome de subdomínio, escolha qualquer um (ex.: seu apelido).');
-  const dep = await wrangler(['deploy'], { capture: true });
+  let dep = await wrangler(['deploy'], { capture: true, allowFail: true });
+  if (dep.code !== 0 && /workers\.dev subdomain/i.test(dep.out)) {
+    // Conta nova na Cloudflare: precisa escolher o subdomínio uma vez, pelo site
+    const onboarding = (dep.out.match(/https:\/\/dash\.cloudflare\.com\/\S+onboarding/) || [])[0] || 'https://dash.cloudflare.com/?to=/:account/workers/onboarding';
+    console.log('');
+    info('A Cloudflare precisa que você escolha um nome de subdomínio (uma vez só).');
+    info('Vou abrir a página: escolha um nome (ex.: seu apelido) e confirme.');
+    openUrl(onboarding);
+    await pause();
+    dep = await wrangler(['deploy'], { capture: true, allowFail: true });
+  }
+  if (dep.code !== 0) fail('A publicação na Cloudflare falhou (veja a mensagem acima).');
   const url = (dep.out.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/i) || [])[0];
   if (!url) fail('Não achei o endereço do servidor na saída acima.');
   conf.signalUrl = url;
@@ -297,6 +324,8 @@ async function setup() {
   await run('gh', ['variable', 'set', 'STAR_SIGNAL_URL', '-R', conf.repo, '--body', conf.signalUrl], { quiet: true });
   await run('gh', ['secret', 'set', 'TAURI_SIGNING_PRIVATE_KEY', '-R', conf.repo], { input: readFileSync(keyFile, 'utf8'), quiet: true });
   await run('gh', ['secret', 'set', 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD', '-R', conf.repo, '--body', conf.keyPassword], { quiet: true });
+  // Se algo foi mudado direto no site do GitHub, traz antes de enviar
+  if (exists) await run('git', ['pull', '-q', '--rebase', '--autostash', 'origin', 'main'], { allowFail: true });
   await run('git', ['push', '-q', '-u', 'origin', 'main']);
   ok(`Código enviado pra github.com/${conf.repo}`);
   await waitForBuild(conf.repo);
@@ -318,5 +347,5 @@ try {
 } catch (e) {
   fail(e.message || String(e));
 } finally {
-  rl.close();
+  if (shared) shared.r.close();
 }

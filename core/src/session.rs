@@ -37,12 +37,14 @@ impl LiveSession {
         ice: Vec<IceServer>,
         events: mpsc::UnboundedSender<HubEvent>,
     ) -> Result<Arc<Self>> {
+        log::info!(target: "star::session", "1/4 criando mini servidor");
         let hub = Hub::new(ice, events.clone())?;
         let port = hub.start_video_ingest().await?;
 
         // --- vídeo ---
+        log::info!(target: "star::session", "2/4 iniciando captura de vídeo");
         let args = ffmpeg_args(&cfg.source, cfg.preset, encoder, port);
-        log::info!("ffmpeg {}", args.join(" "));
+        log::info!(target: "star::session", "ffmpeg {}", args.join(" "));
         let mut video = VideoProcess::spawn(&ffmpeg, &args).await?;
         let fps = Arc::new(AtomicU32::new(0));
         let mut tasks = Vec::new();
@@ -66,7 +68,7 @@ impl LiveSession {
                 let mut lines = BufReader::new(err).lines();
                 let mut last = Vec::<String>::new();
                 while let Ok(Some(l)) = lines.next_line().await {
-                    log::warn!("ffmpeg: {l}");
+                    log::warn!(target: "star::ffmpeg", "{l}");
                     last.push(l);
                     if last.len() > 6 {
                         last.remove(0);
@@ -80,6 +82,7 @@ impl LiveSession {
         }
 
         // --- áudio ---
+        log::info!(target: "star::session", "3/4 iniciando captura de som: {:?}", cfg.audio);
         let gain = Gain::new(cfg.volume as f32 / 100.0);
         let (atx, mut arx) = mpsc::unbounded_channel::<bytes::Bytes>();
         let mut packer = OpusPacker::new(160_000)?;
@@ -108,6 +111,7 @@ impl LiveSession {
             }));
         }
 
+        log::info!(target: "star::session", "4/4 tudo ligado");
         // --- telemetria a cada segundo ---
         {
             let hub = hub.clone();

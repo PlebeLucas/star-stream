@@ -172,6 +172,7 @@ impl AudioCapture {
                 if last_scan.is_none_or(|t| t.elapsed() >= RESCAN) {
                     last_scan = Some(Instant::now());
                     let wanted = platform::wanted_roots(&mode);
+                    log::debug!(target: "star::audio", "programas com som: {wanted:?}");
                     // Programas que pararam / fecharam
                     running.retain(|pid, r| {
                         let keep = wanted.contains(pid) && !r.thread.is_finished();
@@ -188,6 +189,7 @@ impl AudioCapture {
                         let s = Arc::new(AtomicBool::new(false));
                         let buf: SharedBuf = Arc::default();
                         let (s2, b2) = (s.clone(), buf.clone());
+                        log::info!(target: "star::audio", "capturando processo {pid}");
                         if let Ok(t) = std::thread::Builder::new()
                             .name(format!("star-audio-{pid}"))
                             .spawn(move || platform::capture_source(pid, s2, b2))
@@ -350,6 +352,7 @@ mod platform {
     /// PIDs de todos os programas com sessão de som aberta, em qualquer saída de áudio.
     fn session_pids() -> HashSet<u32> {
         let mut pids = HashSet::new();
+        log::debug!(target: "star::audio", "lendo sessões de áudio");
         unsafe {
             let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else {
                 return pids;
@@ -467,6 +470,7 @@ mod platform {
         com_init();
         let r = (|| -> windows::core::Result<()> {
             let client = activate(pid)?;
+            log::debug!(target: "star::audio", "processo {pid}: captura ativada");
             unsafe {
                 // Process loopback exige que a gente diga o formato: float 48 kHz estéreo
                 let fmt = WAVEFORMATEXTENSIBLE {
@@ -495,6 +499,7 @@ mod platform {
                 client.SetEventHandle(event)?;
                 let capture: IAudioCaptureClient = client.GetService()?;
                 client.Start()?;
+                log::debug!(target: "star::audio", "processo {pid}: gravando");
                 let mut tmp: Vec<f32> = Vec::with_capacity(4096);
                 while !stop.load(Ordering::Relaxed) {
                     if WaitForSingleObject(event, 100) != WAIT_OBJECT_0 {
@@ -524,7 +529,7 @@ mod platform {
             Ok(())
         })();
         if let Err(e) = r {
-            log::warn!("captura do processo {pid} falhou: {}", e.message());
+            log::warn!(target: "star::audio", "captura do processo {pid} falhou: {}", e.message());
         }
         com_uninit();
     }

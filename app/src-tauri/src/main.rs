@@ -2,6 +2,8 @@
 // aqui ficam só os comandos que ela chama e a ponte com o núcleo.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod diag;
+
 use serde::Serialize;
 use star_core::audio::{list_audio_apps, AudioApp};
 use star_core::hub::{HubEvent, IceServer, Signal};
@@ -129,12 +131,18 @@ async fn go_live(
     config: LiveConfig,
     ice: Vec<IceServer>,
 ) -> Result<(), String> {
+    log::info!(target: "star", "go_live: {config:?}");
     if let Some(old) = state.live.lock().await.take() {
         old.stop().await;
     }
     let enc = encoder_info(app.clone(), state.clone()).await?.id;
+    log::info!(target: "star", "encoder: {enc:?}, ffmpeg: {}", ffmpeg_path(&app).display());
     let (tx, mut rx) = mpsc::unbounded_channel::<HubEvent>();
-    let session = LiveSession::start(config, ffmpeg_path(&app), enc, ice, tx).await.map_err(err)?;
+    let session = LiveSession::start(config, ffmpeg_path(&app), enc, ice, tx).await.map_err(|e| {
+        log::error!(target: "star", "go_live falhou: {e:#}");
+        err(e)
+    })?;
+    log::info!(target: "star", "go_live: transmissão iniciada");
     *state.live.lock().await = Some(session);
     // Eventos do núcleo vão pra interface (que encaminha os sinais pelo servidor)
     let app2 = app.clone();
@@ -196,7 +204,14 @@ async fn auto_update(app: tauri::AppHandle) {
     }
 }
 
+/// Abre a pasta com o arquivo de diagnóstico.
+#[tauri::command]
+fn open_log_folder() -> Result<(), String> {
+    tauri_plugin_opener::open_path(diag::log_dir(), None::<&str>).map_err(err)
+}
+
 fn main() {
+    diag::init();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -216,7 +231,8 @@ fn main() {
             stop_live,
             set_volume,
             signal_in,
-            viewer_gone
+            viewer_gone,
+            open_log_folder
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o STAR // STREAM");
