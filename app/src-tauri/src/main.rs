@@ -148,6 +148,9 @@ async fn go_live(
     let app2 = app.clone();
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
+            if !matches!(ev, HubEvent::Stats { .. }) {
+                log::info!(target: "star::evento", "{ev:?}");
+            }
             let _ = app2.emit("hub", ev);
         }
     });
@@ -204,6 +207,17 @@ async fn auto_update(app: tauri::AppHandle) {
     }
 }
 
+/// Erros e eventos da interface também vão pro arquivo de diagnóstico.
+#[tauri::command]
+fn js_log(level: String, message: String) {
+    let msg: String = message.chars().take(2000).collect();
+    match level.as_str() {
+        "error" => log::error!(target: "star::ui", "{msg}"),
+        "warn" => log::warn!(target: "star::ui", "{msg}"),
+        _ => log::info!(target: "star::ui", "{msg}"),
+    }
+}
+
 /// Abre a pasta com o arquivo de diagnóstico.
 #[tauri::command]
 fn open_log_folder() -> Result<(), String> {
@@ -232,8 +246,14 @@ fn main() {
             set_volume,
             signal_in,
             viewer_gone,
-            open_log_folder
+            open_log_folder,
+            js_log
         ])
-        .run(tauri::generate_context!())
-        .expect("erro ao iniciar o STAR // STREAM");
+        .build(tauri::generate_context!())
+        .expect("erro ao iniciar o STAR // STREAM")
+        .run(|_app, ev| {
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = ev {
+                log::info!(target: "star", "app encerrando normalmente ({ev:?})");
+            }
+        });
 }

@@ -454,8 +454,10 @@ mod platform {
             };
             let event = CreateEventW(None, false, false, None)?;
             let handler: IActivateAudioInterfaceCompletionHandler = Done(event).into();
+            log::debug!(target: "star::audio", "processo {pid}: pedindo captura ao Windows");
             let op = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, &IAudioClient::IID, Some(&prop), &handler)?;
-            WaitForSingleObject(event, 5_000);
+            let w = WaitForSingleObject(event, 5_000);
+            log::debug!(target: "star::audio", "processo {pid}: Windows respondeu ({})", w.0);
             let _ = CloseHandle(event);
             let mut hr = windows::core::HRESULT(0);
             let mut unk: Option<windows::core::IUnknown> = None;

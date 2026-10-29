@@ -7,6 +7,11 @@ const invoke = T ? T.core.invoke : async () => { throw new Error('rodando fora d
 const listen = T ? T.event.listen : async () => {};
 
 const $ = (id) => document.getElementById(id);
+
+// Tudo de errado na interface vai pro arquivo de diagnóstico
+const jsLog = (level, message) => invoke('js_log', { level, message: String(message) }).catch(() => {});
+window.addEventListener('error', (e) => jsLog('error', `${e.message} @ ${e.filename}:${e.lineno}`));
+window.addEventListener('unhandledrejection', (e) => jsLog('error', 'promise: ' + (e.reason && e.reason.stack || e.reason)));
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
@@ -49,6 +54,7 @@ function show(screen) {
 
 let toastTimer;
 function toast(msg) {
+  jsLog('warn', 'aviso na tela: ' + msg);
   const t = $('toast');
   t.textContent = msg;
   t.hidden = false;

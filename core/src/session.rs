@@ -62,24 +62,45 @@ impl LiveSession {
                 }
             }));
         }
+        let last_err = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         if let Some(err) = video.child.stderr.take() {
             let ev = events.clone();
+            let last_err = last_err.clone();
             tasks.push(tokio::spawn(async move {
                 let mut lines = BufReader::new(err).lines();
-                let mut last = Vec::<String>::new();
                 while let Ok(Some(l)) = lines.next_line().await {
                     log::warn!(target: "star::ffmpeg", "{l}");
+                    let mut last = last_err.lock().unwrap();
                     last.push(l);
                     if last.len() > 6 {
                         last.remove(0);
                     }
                 }
-                // stderr fechou = FFmpeg saiu
-                let _ = ev.send(HubEvent::Error {
-                    message: format!("a captura de vídeo parou. {}", last.join(" | ")).trim().to_string(),
-                });
+                log::warn!(target: "star::session", "FFmpeg encerrou");
+                let msg = last_err.lock().unwrap().join(" | ");
+                let _ = ev.send(HubEvent::Error { message: format!("A captura de vídeo parou. {msg}").trim().to_string() });
             }));
         }
+
+        // Espera o FFmpeg mostrar que está vivo antes de seguir: se ele cair logo
+        // de cara, a interface recebe o erro em vez de "ao vivo" com tela preta.
+        for _ in 0..15 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Ok(Some(status)) = video.child.try_wait() {
+                tokio::time::sleep(Duration::from_millis(100)).await; // deixa o stderr terminar de chegar
+                let msg = last_err.lock().unwrap().join(" | ");
+                log::error!(target: "star::session", "FFmpeg saiu na largada ({status}): {msg}");
+                for t in &tasks {
+                    t.abort();
+                }
+                hub.close_all().await;
+                anyhow::bail!("a captura de vídeo não iniciou: {msg}");
+            }
+            if fps.load(Ordering::Relaxed) != 0 {
+                break;
+            }
+        }
+        log::info!(target: "star::session", "captura de vídeo rodando");
 
         // --- áudio ---
         log::info!(target: "star::session", "3/4 iniciando captura de som: {:?}", cfg.audio);

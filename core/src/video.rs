@@ -134,10 +134,11 @@ pub fn ffmpeg_args(source: &Source, preset: Preset, encoder: Encoder, rtp_port: 
         "1".into(),
         "-progress".into(),
         "pipe:1".into(),
+        // Dispositivo da GPU com nome próprio ("star"): sem nome o FFmpeg chama de "d3d11va0"
         "-init_hw_device".into(),
-        "d3d11va".into(),
+        "d3d11va=star".into(),
         "-filter_hw_device".into(),
-        "d3d11va".into(),
+        "star".into(),
         "-f".into(),
         "lavfi".into(),
         "-i".into(),
@@ -254,6 +255,7 @@ mod tests {
         let line = a.join(" ");
         assert!(line.contains("gfxcapture=hmonitor=65537:max_framerate=60:display_border=0"));
         assert!(line.contains("height=-1440"));
+        assert!(line.contains("-init_hw_device d3d11va=star -filter_hw_device star"));
         assert!(line.contains("-c:v h264_nvenc"));
         assert!(line.contains("-b:v 15000k"));
         assert!(line.ends_with("rtp://127.0.0.1:5004?pkt_size=1200"));
