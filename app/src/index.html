@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STAR // STREAM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="star" viewBox="0 0 40 40"><polygon points="20,2 24,16 38,20 24,24 20,38 16,24 2,20 16,16" fill="none" stroke="currentColor" stroke-width="2"/><rect x="17" y="17" width="6" height="6" fill="currentColor"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+  <symbol id="vol" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+  <symbol id="full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+</svg>
+
+<!-- ============ LOGIN ============ -->
+<section id="screen-login" class="screen grid-bg">
+  <div class="login-card chamfer">
+    <div class="brand big"><svg class="mark"><use href="#star"/></svg><div><div class="wordmark">STAR <b>//</b> STREAM</div><div class="mono dim">STAR CORP. · TERMINAL DE TRANSMISSÃO</div></div></div>
+    <label class="field" id="server-field">
+      <span class="mono dim">ENDEREÇO DO SERVIDOR STAR</span>
+      <input id="server-url" type="url" placeholder="https://star-stream-signal.SEU-USUARIO.workers.dev" autocomplete="off">
+    </label>
+    <button id="btn-login" class="btn-primary chamfer">ENTRAR COM DISCORD</button>
+    <p id="login-status" class="mono dim small" role="status"></p>
+  </div>
+</section>
+
+<!-- ============ CONFIGURAR ============ -->
+<section id="screen-home" class="screen grid-bg" hidden>
+  <div class="wrap">
+    <header class="topbar">
+      <div class="brand"><svg class="mark"><use href="#star"/></svg><div><div class="wordmark">STAR <b>//</b> STREAM</div><div class="mono dim tiny">STAR CORP. · TERMINAL DE TRANSMISSÃO · v0.1</div></div></div>
+      <div class="chips mono">
+        <span class="chip"><i class="dot" id="net-dot"></i><span id="net-text">CONECTANDO…</span></span>
+        <span class="chip chamfer-tr"><img id="me-avatar" alt=""><span id="me-name">—</span></span>
+        <button id="btn-logout" class="chip btn-ghost">SAIR</button>
+      </div>
+    </header>
+
+    <section id="live-now" class="block" hidden>
+      <h2><span class="acc">◆</span> AO VIVO AGORA</h2>
+      <div id="live-list" class="live-list"></div>
+    </section>
+
+    <div class="cols">
+      <div class="main-col">
+        <section class="block">
+          <h2><span class="acc">01</span> — O QUE MOSTRAR <button id="btn-refresh" class="link mono tiny">ATUALIZAR</button></h2>
+          <div id="sources" class="src-grid"></div>
+        </section>
+
+        <section class="block">
+          <h2><span class="acc">02</span> — SOM</h2>
+          <div class="opt-grid" id="audio-modes">
+            <button class="opt" data-audio="pc"><b>PC inteiro</b><span>Tudo que toca no PC</span></button>
+            <button class="opt" data-audio="app"><b>Só um app</b><span>Escolha o programa</span></button>
+            <button class="opt" data-audio="off"><b>Sem som</b><span>Só a imagem</span></button>
+          </div>
+          <label class="field" id="app-picker" hidden>
+            <span class="mono dim">PROGRAMA</span>
+            <select id="audio-app"></select>
+          </label>
+          <div class="vol-row">
+            <label for="vol">Volume da transmissão</label>
+            <input id="vol" type="range" min="0" max="150" value="100">
+            <span id="vol-val" class="mono acc">100%</span>
+            <span class="hint">Independente do seu fone: seus amigos ouvem nesse volume, você continua ouvindo no seu.</span>
+          </div>
+          <div class="banner mono"><svg class="ico"><use href="#lock"/></svg>ÁUDIO DO DISCORD SEMPRE EXCLUÍDO · ninguém se ouve na transmissão</div>
+        </section>
+
+        <section class="block">
+          <h2><span class="acc">03</span> — QUALIDADE</h2>
+          <div class="opt-grid" id="presets">
+            <button class="opt" data-preset="leve"><b class="caps">LEVE</b><span class="mono">1080p · 30fps · 6 Mbps</span></button>
+            <button class="opt" data-preset="equilibrada"><b class="caps">EQUILIBRADA</b><span class="mono">1080p · 60fps · 10 Mbps</span></button>
+            <button class="opt" data-preset="maxima"><b class="caps">MÁXIMA</b><span class="mono">1440p · 60fps · 15 Mbps</span></button>
+          </div>
+          <span class="mono dim tiny" id="encoder-line">ENCODER: DETECTANDO…</span>
+        </section>
+      </div>
+
+      <aside class="side-col">
+        <div class="panel chamfer-big">
+          <div class="panel-head mono"><span>RESUMO</span><span id="sum-src">—</span></div>
+          <div class="preview mono">[PRÉVIA APARECE AO VIVO]</div>
+          <div class="kv mono">
+            <div><span>SAÍDA</span><span id="sum-q">—</span></div>
+            <div><span>SOM</span><span id="sum-a">—</span></div>
+            <div><span>ACESSO</span><span>Só membros do servidor</span></div>
+          </div>
+        </div>
+        <button id="btn-golive" class="btn-primary chamfer big-btn"><i class="sq"></i>INICIAR TRANSMISSÃO</button>
+        <p id="home-status" class="mono small acc" role="status"></p>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<!-- ============ AO VIVO ============ -->
+<section id="screen-live" class="screen grid-bg" hidden>
+  <div class="wrap">
+    <header class="topbar">
+      <div class="row gap16"><span class="onair chamfer"><i class="sq pulse"></i>AO VIVO</span><span class="mono dim" id="live-timer">00:00:00</span></div>
+      <div class="wordmark">STAR <b>//</b> STREAM</div>
+    </header>
+    <div class="cols">
+      <div class="main-col">
+        <div class="stage">
+          <div class="mono dim">Transmitindo: <span id="live-src">—</span></div>
+          <span class="corner tl mono acc">REC ▸ <span id="live-src2">—</span></span>
+          <span class="corner br mono dim" id="live-q">—</span>
+        </div>
+        <div class="tiles">
+          <div class="tile"><span>FPS</span><b id="t-fps">—</b></div>
+          <div class="tile"><span>BITRATE</span><b id="t-kbps">—</b></div>
+          <div class="tile"><span>ASSISTINDO</span><b id="t-viewers">0</b></div>
+          <div class="tile"><span>ENCODER</span><b id="t-enc" class="small-b">—</b></div>
+        </div>
+        <div class="vol-row">
+          <label for="live-vol">Volume da transmissão</label>
+          <input id="live-vol" type="range" min="0" max="150" value="100">
+          <span id="live-vol-val" class="mono acc">100%</span>
+        </div>
+      </div>
+      <aside class="side-col">
+        <div class="panel">
+          <div class="panel-head mono"><span>ASSISTINDO</span><span class="acc" id="viewer-count">0</span></div>
+          <div id="viewer-list" class="viewer-list"><p class="mono dim small pad">Ninguém ainda. O aviso já foi pro Discord.</p></div>
+        </div>
+        <div class="kv panel mono">
+          <div><span>SOM</span><span id="live-audio">—</span></div>
+          <div><span>DISCORD</span><span class="acc">EXCLUÍDO</span></div>
+        </div>
+        <div class="panel" id="live-watching" hidden>
+          <div class="panel-head mono"><span>VOCÊ ESTÁ ASSISTINDO</span><span id="live-watching-who" class="acc">—</span></div>
+          <div class="pad row gap16"><button id="btn-back-video" class="btn-primary chamfer grow">VOLTAR PRO VÍDEO</button></div>
+        </div>
+        <div class="panel" id="live-others" hidden>
+          <div class="panel-head mono"><span>OUTRAS LIVES</span><span></span></div>
+          <div id="live-list-2" class="live-list single pad"></div>
+        </div>
+        <button id="btn-stop" class="btn-outline">ENCERRAR</button>
+        <p id="live-status" class="mono small acc" role="status"></p>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ASSISTINDO ============ -->
+<section id="screen-watch" class="screen" hidden>
+  <div class="wrap tight">
+    <header class="topbar slim">
+      <div class="brand"><svg class="mark sm"><use href="#star"/></svg><div class="wordmark sm">STAR <b>//</b> STREAM</div><span class="mono dim tiny">CANAL PRIVADO</span></div>
+      <div class="chips mono">
+        <button id="watch-livebar" class="chip livebar" hidden><i class="sq pulse"></i><span>VOCÊ ESTÁ AO VIVO · <b id="watch-livebar-n">0</b> ASSISTINDO</span><span class="acc">PAINEL ›</span></button>
+        <button id="btn-leave" class="btn-ghost chip">SAIR</button>
+      </div>
+    </header>
+    <div class="player" id="player">
+      <video id="video" autoplay playsinline></video>
+      <span class="corner tl onair small"><i class="sq pulse"></i>AO VIVO</span>
+      <span class="corner tr mono dim" id="watch-who">—</span>
+      <div class="player-msg mono" id="watch-msg">CONECTANDO…</div>
+    </div>
+    <div class="controls">
+      <button id="btn-mute" class="icon-btn" aria-label="Mutar"><svg class="ico"><use href="#vol"/></svg></button>
+      <label for="watch-vol" class="dim">Volume</label>
+      <input id="watch-vol" type="range" min="0" max="100" value="80">
+      <span class="mono dim small grow" id="watch-stats">—</span>
+      <button id="btn-full" class="icon-btn" aria-label="Tela cheia"><svg class="ico"><use href="#full"/></svg></button>
+    </div>
+  </div>
+</section>
+
+<div id="toast" class="toast mono" role="alert" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+name = "star-stream-signal"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+# Preenchido automaticamente pelo CONFIGURAR.cmd
+[vars]
+DISCORD_CLIENT_ID = "1565477746476323036"
+GUILD_ID = "429738624368771072"
+GITHUB_REPO = "PlebeLucas/star-stream"
+
+# Segredos (o CONFIGURAR.cmd cuida deles):
+#   DISCORD_CLIENT_SECRET, SESSION_SECRET, DISCORD_WEBHOOK_URL
+#   TURN_KEY_ID, TURN_KEY_API_TOKEN - (opcional) relay reserva da Cloudflare
+#   ou TURN_URLS, TURN_USERNAME, TURN_CREDENTIAL - (opcional) outro serviço de TURN

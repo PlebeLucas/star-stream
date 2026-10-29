@@ -1,0 +1,26 @@
+[package]
+name = "star-stream"
+version = "0.1.0"
+edition = "2021"
+description = "STAR // STREAM"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+star-core = { path = "../../core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+rand = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

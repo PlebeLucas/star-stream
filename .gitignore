@@ -1,0 +1,11 @@
+target/
+node_modules/
+.wrangler/
+.dev.vars
+app/src-tauri/bin/
+app/src-tauri/gen/
+*.zip
+
+# Segredos da configuração: NUNCA sobem pro GitHub
+setup/.config.json
+setup/.keys/
