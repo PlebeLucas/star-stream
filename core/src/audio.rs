@@ -167,6 +167,7 @@ impl AudioCapture {
             let mut last_scan: Option<Instant> = None;
             let mut mixed = Vec::with_capacity(MIX_FRAMES * CHANNELS);
             let mut next = Instant::now();
+            let mut ticks: u64 = 0;
 
             while !stop2.load(Ordering::Relaxed) {
                 if last_scan.is_none_or(|t| t.elapsed() >= RESCAN) {
@@ -201,7 +202,14 @@ impl AudioCapture {
 
                 let bufs: Vec<SharedBuf> = running.values().map(|r| r.buf.clone()).collect();
                 mix_tick(&bufs, &mut mixed);
+                if ticks < 3 {
+                    log::debug!(target: "star::audio", "mixer: bloco {ticks}");
+                }
                 on_samples(&mixed);
+                if ticks < 3 {
+                    log::debug!(target: "star::audio", "mixer: bloco {ticks} entregue");
+                }
+                ticks += 1;
 
                 next += Duration::from_millis(10);
                 let now = Instant::now();
@@ -388,8 +396,13 @@ mod platform {
             AudioMode::Pc => {
                 let mut roots: HashSet<u32> = HashSet::new();
                 for pid in session_pids() {
-                    if !is_excluded(pid, &procs) {
-                        roots.insert(root_of(pid, &procs));
+                    let name = procs.get(&pid).map(|p| p.name.as_str()).unwrap_or("?");
+                    if is_excluded(pid, &procs) {
+                        log::debug!(target: "star::audio", "ignorando {name} ({pid}): Discord ou o próprio app");
+                    } else {
+                        let root = root_of(pid, &procs);
+                        log::debug!(target: "star::audio", "{name} ({pid}) -> raiz {root}");
+                        roots.insert(root);
                     }
                 }
                 roots.into_iter().collect()
@@ -424,8 +437,13 @@ mod platform {
         }
     }
 
+    /// O Windows se perde quando várias capturas por processo são pedidas no
+    /// mesmo instante: liga uma de cada vez.
+    static ACTIVATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Abre a captura do som de UMA árvore de processos.
     fn activate(pid: u32) -> windows::core::Result<IAudioClient> {
+        let _one_at_a_time = ACTIVATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             let params = AUDIOCLIENT_ACTIVATION_PARAMS {
                 ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
@@ -462,8 +480,11 @@ mod platform {
             let mut hr = windows::core::HRESULT(0);
             let mut unk: Option<windows::core::IUnknown> = None;
             op.GetActivateResult(&mut hr, &mut unk)?;
+            log::debug!(target: "star::audio", "processo {pid}: resultado 0x{:08X}, interface {}", hr.0 as u32, unk.is_some());
             hr.ok()?;
-            unk.ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?.cast()
+            let client: IAudioClient = unk.ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?.cast()?;
+            log::debug!(target: "star::audio", "processo {pid}: cliente de áudio pronto");
+            Ok(client)
         }
     }
 
@@ -489,6 +510,7 @@ mod platform {
                     dwChannelMask: 0x3,
                     SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
                 };
+                log::debug!(target: "star::audio", "processo {pid}: configurando formato");
                 client.Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
                     AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
@@ -500,9 +522,11 @@ mod platform {
                 let event = CreateEventW(None, false, false, None)?;
                 client.SetEventHandle(event)?;
                 let capture: IAudioCaptureClient = client.GetService()?;
+                log::debug!(target: "star::audio", "processo {pid}: formato ok, iniciando");
                 client.Start()?;
                 log::debug!(target: "star::audio", "processo {pid}: gravando");
                 let mut tmp: Vec<f32> = Vec::with_capacity(4096);
+                let mut first = true;
                 while !stop.load(Ordering::Relaxed) {
                     if WaitForSingleObject(event, 100) != WAIT_OBJECT_0 {
                         continue;
@@ -522,6 +546,10 @@ mod platform {
                             tmp.extend_from_slice(std::slice::from_raw_parts(data as *const f32, n));
                         }
                         let _ = capture.ReleaseBuffer(frames);
+                        if first {
+                            first = false;
+                            log::debug!(target: "star::audio", "processo {pid}: primeiro som ({frames} quadros, flags {flags})");
+                        }
                         buf.lock().unwrap().push(&tmp);
                     }
                 }

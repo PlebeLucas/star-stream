@@ -126,8 +126,16 @@ impl LiveSession {
         {
             let hub = hub.clone();
             tasks.push(tokio::spawn(async move {
+                let mut n = 0u32;
                 while let Some(p) = arx.recv().await {
+                    if n < 2 {
+                        log::debug!(target: "star::session", "áudio: pacote Opus {n} ({} bytes)", p.len());
+                    }
                     hub.write_audio(p).await;
+                    if n < 2 {
+                        log::debug!(target: "star::session", "áudio: pacote {n} enviado");
+                    }
+                    n = n.saturating_add(1);
                 }
             }));
         }
