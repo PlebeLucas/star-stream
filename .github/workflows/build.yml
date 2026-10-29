@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # CMake 4 recusa projetos antigos (a libopus usa cmake_minimum_required < 3.5)
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
 jobs:
   windows:
     runs-on: windows-latest
