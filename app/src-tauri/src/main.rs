@@ -18,6 +18,8 @@ use tokio::sync::{mpsc, Mutex};
 
 #[derive(Default)]
 struct AppState {
+    /// Link starstream:// que abriu o app, esperando a interface pegar
+    pending_url: std::sync::Mutex<Option<String>>,
     live: Mutex<Option<Arc<LiveSession>>>,
     encoder: Mutex<Option<Encoder>>,
 }
@@ -97,6 +99,34 @@ async fn login(app: tauri::AppHandle, signal_url: String) -> Result<String, Stri
 #[tauri::command]
 fn list_sources() -> Vec<SourceInfo> {
     sources::list()
+}
+
+/// Miniatura de uma tela ou janela (data URL JPEG), pra prévia na escolha.
+#[tauri::command]
+async fn source_thumb(kind: String, handle: u64, w: u32, h: u32) -> Option<String> {
+    tokio::task::spawn_blocking(move || sources::thumbnail(&kind, handle, w, h)).await.ok().flatten()
+}
+
+/// A interface pega o link que abriu o app (se houver) quando fica pronta.
+#[tauri::command]
+fn take_pending_url(state: State<'_, AppState>) -> Option<String> {
+    state.pending_url.lock().unwrap().take()
+}
+
+fn handle_open_url(app: &tauri::AppHandle, url: String) {
+    if !url.starts_with("starstream://") {
+        return;
+    }
+    log::info!(target: "star", "aberto por link: {url}");
+    if let Some(st) = app.try_state::<AppState>() {
+        *st.pending_url.lock().unwrap() = Some(url.clone());
+    }
+    let _ = app.emit("open-url", url);
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
 }
 
 #[tauri::command]
@@ -227,9 +257,34 @@ fn open_log_folder() -> Result<(), String> {
 fn main() {
     diag::init();
     tauri::Builder::default()
+        // Um app só: clicar num link com o app aberto manda o link pro que já está aberto
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            use tauri_plugin_deep_link::DeepLinkExt;
+            // Garante que links starstream:// abrem este app (registro do usuário, sem admin)
+            if let Err(e) = app.deep_link().register_all() {
+                log::warn!(target: "star", "registro do link falhou: {e}");
+            }
+            let h = app.handle().clone();
+            app.deep_link().on_open_url(move |ev| {
+                for u in ev.urls() {
+                    handle_open_url(&h, u.to_string());
+                }
+            });
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                for u in urls {
+                    handle_open_url(app.handle(), u.to_string());
+                }
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_update(handle));
             Ok(())
@@ -247,7 +302,9 @@ fn main() {
             signal_in,
             viewer_gone,
             open_log_folder,
-            js_log
+            js_log,
+            source_thumb,
+            take_pending_url
         ])
         .build(tauri::generate_context!())
         .expect("erro ao iniciar o STAR // STREAM")

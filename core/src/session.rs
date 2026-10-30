@@ -43,7 +43,9 @@ impl LiveSession {
 
         // --- vídeo ---
         log::info!(target: "star::session", "2/4 iniciando captura de vídeo");
-        let args = ffmpeg_args(&cfg.source, cfg.preset, encoder, port);
+        let src_size = crate::sources::source_size(&cfg.source);
+        log::info!(target: "star::session", "tamanho da fonte: {src_size:?}");
+        let args = ffmpeg_args(&cfg.source, src_size, cfg.preset, encoder, port);
         log::info!(target: "star::session", "ffmpeg {}", args.join(" "));
         let mut video = VideoProcess::spawn(&ffmpeg, &args).await?;
         let fps = Arc::new(AtomicU32::new(0));

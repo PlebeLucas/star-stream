@@ -1,6 +1,6 @@
 [package]
 name = "star-stream"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "STAR // STREAM"
 
@@ -12,6 +12,8 @@ star-core = { path = "../../core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -27,3 +29,6 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+webrtc-util = { path = "../../vendor/webrtc-util" }

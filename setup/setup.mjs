@@ -174,6 +174,8 @@ async function publish() {
   c.app.windows[0].additionalBrowserArgs =
     '--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,WebRtcHideLocalIpsWithMdns ' +
     '--force-webrtc-ip-handling-policy=default --autoplay-policy=no-user-gesture-required';
+  // Links starstream:// abrem o app (registrado pelo instalador)
+  c.plugins['deep-link'] = { desktop: { schemes: ['starstream'] } };
   writeJson(tauriConf, c);
   const cargo = join(APP, 'src-tauri', 'Cargo.toml');
   writeFileSync(cargo, readFileSync(cargo, 'utf8').replace(/^version = ".*"$/m, `version = "${next}"`));

@@ -18,6 +18,7 @@ const store = {
 };
 
 const PRESETS = {
+  economica: '720p · 30fps · 2,5 Mbps',
   leve: '1080p · 30fps · 6 Mbps',
   equilibrada: '1080p · 60fps · 10 Mbps',
   maxima: '1440p · 60fps · 15 Mbps',
@@ -190,6 +191,7 @@ function onRoomMessage(m) {
   switch (m.t) {
     case 'hello':
       S.me = m.you;
+      tryPendingWatch();
       S.ice = m.ice || [];
       setNet('ok', 'SERVIDOR ONLINE');
       $('me-name').textContent = m.you.user.name;
@@ -200,6 +202,7 @@ function onRoomMessage(m) {
     case 'presence':
       S.peers = m.peers || [];
       renderLiveNow();
+      tryPendingWatch();
       if (S.watch && !S.peers.some((p) => p.peerId === S.watch.peerId && p.live)) {
         stopWatching('A transmissão terminou.');
       }
@@ -288,6 +291,8 @@ async function refreshSources() {
   }
   renderSources();
   renderSummary();
+  refreshThumbs();
+  refreshPreview();
 }
 $('btn-refresh').addEventListener('click', refreshSources);
 
@@ -310,9 +315,10 @@ function renderSources() {
             S.cfg.source = s;
             renderSources();
             renderSummary();
+            refreshPreview();
           },
         },
-        el('span', { class: 'thumb' }, el('span', {}, s.detail.toUpperCase())),
+        el('span', { class: 'thumb' }, thumbImg(s), el('span', {}, s.detail.toUpperCase())),
         el(
           'span',
           { class: 'meta' },
@@ -646,5 +652,89 @@ window.addEventListener('beforeunload', () => {
   if (S.live) send({ t: 'live', on: false });
   if (S.watch) sendSignal(S.watch.peerId, { kind: 'leave' }, 'v');
 });
+
+// ---------------- prévias das telas ----------------
+
+const thumbs = new Map(); // handle -> data URL
+function thumbImg(s) {
+  const img = el('img', { alt: '' });
+  const url = thumbs.get(s.handle);
+  if (url) img.src = url;
+  else img.hidden = true;
+  img.dataset.handle = String(s.handle);
+  return img;
+}
+
+let thumbsBusy = false;
+async function refreshThumbs() {
+  if (thumbsBusy || $('screen-home').hidden || !S.sources.length) return;
+  thumbsBusy = true;
+  try {
+    for (const s of S.sources) {
+      const url = await invoke('source_thumb', { kind: s.kind, handle: s.handle, w: 320, h: 180 }).catch(() => null);
+      if (!url) continue;
+      thumbs.set(s.handle, url);
+      const img = document.querySelector(`#sources img[data-handle="${s.handle}"]`);
+      if (img) {
+        img.src = url;
+        img.hidden = false;
+      }
+    }
+  } finally {
+    thumbsBusy = false;
+  }
+}
+
+let previewBusy = false;
+async function refreshPreview() {
+  if (previewBusy || $('screen-home').hidden || !S.cfg.source) return;
+  previewBusy = true;
+  try {
+    const s = S.cfg.source;
+    const url = await invoke('source_thumb', { kind: s.kind, handle: s.handle, w: 640, h: 360 }).catch(() => null);
+    if (S.cfg.source !== s) return;
+    $('preview-img').hidden = !url;
+    $('preview-txt').hidden = !!url;
+    $('preview-txt').textContent = url ? '' : 'SEM PRÉVIA (janela minimizada?)';
+    if (url) $('preview-img').src = url;
+  } finally {
+    previewBusy = false;
+  }
+}
+setInterval(refreshThumbs, 5000);
+setInterval(refreshPreview, 1500);
+
+// ---------------- link do aviso (starstream://assistir/ID) ----------------
+
+let pendingWatchId = null;
+let pendingWatchAt = 0;
+function onOpenUrl(url) {
+  const m = /^starstream:\/\/assistir\/(\d+)/.exec(url || '');
+  if (!m) return;
+  pendingWatchId = m[1];
+  pendingWatchAt = Date.now();
+  jsLog('info', 'link: assistir ' + pendingWatchId);
+  tryPendingWatch();
+  setTimeout(tryPendingWatch, 15500);
+}
+
+function tryPendingWatch() {
+  if (!pendingWatchId || !S.me) return;
+  const peer = S.peers.find((p) => p.live && p.user.id === pendingWatchId && p.peerId !== S.me.peerId);
+  if (peer) {
+    pendingWatchId = null;
+    if (!S.watch || S.watch.peerId !== peer.peerId) startWatching(peer);
+    else show('watch');
+    return;
+  }
+  // Ainda não chegou a lista de quem está ao vivo: espera um pouco
+  if (Date.now() - pendingWatchAt > 15000) {
+    pendingWatchId = null;
+    toast('Essa transmissão já terminou.');
+  }
+}
+
+listen('open-url', ({ payload }) => onOpenUrl(payload));
+invoke('take_pending_url').then(onOpenUrl).catch(() => {});
 
 initLogin();

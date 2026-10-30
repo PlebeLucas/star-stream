@@ -182,6 +182,21 @@ export default {
       return env.ROOM.get(id).fetch(new Request(fwd.toString(), request));
     }
 
+    // 5) Link do aviso: abre o app direto na live de quem avisou
+    const watch = url.pathname.match(/^\/assistir\/(\d{5,25})$/);
+    if (watch) {
+      const deep = `starstream://assistir/${watch[1]}`;
+      const page = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>STAR // STREAM</title>
+<body style="margin:0;background:#07080A;color:#F2F4F5;font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh">
+<div style="border:1px solid #FF2A3D;padding:32px 40px;max-width:440px;display:flex;flex-direction:column;gap:16px">
+<div style="letter-spacing:.2em;font-weight:700">STAR <span style="color:#FF2A3D">//</span> STREAM</div>
+<p style="color:#9AA1AB;line-height:1.5;margin:0">Abrindo o app… Se o navegador perguntar, clique em <b>Abrir STAR Stream</b>.</p>
+<a href="${deep}" style="background:#FF2A3D;color:#07080A;text-decoration:none;font-weight:700;letter-spacing:.15em;text-align:center;padding:14px">ABRIR NO APP</a>
+<a href="/baixar" style="color:#9AA1AB;text-align:center">Ainda não tem o app? Baixar</a>
+</div><script>location.href=${JSON.stringify(deep)};</script></body>`;
+      return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+    }
+
     // 4) Link curto de download: sempre aponta pro instalador da versão mais nova
     if (url.pathname === '/baixar') {
       if (!env.GITHUB_REPO) return html('O download ainda não foi configurado.', 404);
@@ -220,6 +235,7 @@ export class Room {
 
   async fetch(request) {
     const url = new URL(request.url);
+    this.origin = url.origin;
     const user = JSON.parse(decodeURIComponent(escape(atob(url.searchParams.get('u')))));
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
@@ -260,7 +276,7 @@ export class Room {
       me.live = msg.on ? { since: Date.now(), info: String(msg.info || '').slice(0, 120) } : null;
       this.broadcastPresence();
       // notify: false = o transmissor desligou o aviso (ou é só uma reconexão)
-      if (msg.on && !wasLive && msg.notify !== false) this.announce(me.user.name, me.live.info);
+      if (msg.on && !wasLive && msg.notify !== false) this.announce(me.user, me.live.info);
       return;
     }
 
@@ -286,9 +302,10 @@ export class Room {
     }
   }
 
-  announce(name, info) {
+  announce(user, info) {
     if (!this.env.DISCORD_WEBHOOK_URL) return;
-    const content = `🔴 **${name}** entrou ao vivo no STAR // STREAM${info ? ` — ${info}` : ''}. Abra o app pra assistir.`;
+    const link = this.origin ? `\n▶ **Assistir:** <${this.origin}/assistir/${user.id}>` : '';
+    const content = `🔴 **${user.name}** entrou ao vivo no STAR // STREAM${info ? ` — ${info}` : ''}${link}`;
     fetch(this.env.DISCORD_WEBHOOK_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

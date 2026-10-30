@@ -21,6 +21,7 @@ w.__TAURI__ = {
       if (cmd === 'default_signal_url') return 'https://sinal.test';
       if (cmd === 'list_sources') return [{ kind: 'monitor', handle: 1, name: 'Monitor principal', detail: '2560×1440', pid: 0 }];
       if (cmd === 'encoder_info') return { id: 'nvenc', label: 'NVIDIA (NVENC)' };
+      if (cmd === 'source_thumb') return 'data:image/jpeg;base64,AAAA';
       return null;
     },
   },
@@ -57,8 +58,8 @@ const tick = () => new Promise((r) => setTimeout(r, 10));
 (async () => {
   await tick();
   const ws = FakeWS.last;
-  const me = { peerId: 'EU', user: { name: 'Eu', avatar: null } };
-  const amigo = { peerId: 'AMIGO', user: { name: 'Amigo', avatar: null } };
+  const me = { peerId: 'EU', user: { id: '1', name: 'Eu', avatar: null } };
+  const amigo = { peerId: 'AMIGO', user: { id: '2', name: 'Amigo', avatar: null } };
   ws.recv({ t: 'hello', you: me, ice: [] });
   ws.recv({ t: 'presence', peers: [{ ...me, live: null }, { ...amigo, live: { info: 'jogo' } }] });
   assert.equal($('live-now').hidden, false, 'live do amigo aparece');
@@ -114,7 +115,22 @@ const tick = () => new Promise((r) => setTimeout(r, 10));
   $('btn-leave').click();
   await tick();
   assert.equal($('screen-home').hidden, false);
-  console.log('OK: transmitir e assistir ao mesmo tempo, sinais separados por papel');
+
+  // 8) Prévias: miniatura no cartão e prévia grande no resumo
+  await tick();
+  assert.ok(invokes.some((i) => i.cmd === 'source_thumb' && i.args.w === 320), 'pediu miniatura');
+  assert.ok(invokes.some((i) => i.cmd === 'source_thumb' && i.args.w === 640), 'pediu prévia grande');
+  assert.equal(w.document.querySelector('#sources img').getAttribute('src'), 'data:image/jpeg;base64,AAAA');
+  assert.equal($('preview-img').hidden, false);
+
+  // 9) Link do aviso no Discord abre direto a live do amigo
+  const joinsBefore = sent.filter((m) => m.t === 'signal' && m.data.kind === 'join').length;
+  listeners['open-url']({ payload: 'starstream://assistir/2' });
+  await tick();
+  assert.equal($('screen-watch').hidden, false, 'link abriu a tela de assistir');
+  assert.equal(sent.filter((m) => m.t === 'signal' && m.data.kind === 'join').length, joinsBefore + 1);
+  assert.equal(sent[sent.length - 1].to, 'AMIGO');
+  console.log('OK: transmitir e assistir juntos, prévias das telas e link do aviso abrindo a live');
   process.exit(0);
 })().catch((e) => {
   console.error(e);

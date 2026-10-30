@@ -44,6 +44,8 @@ impl Encoder {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Preset {
+    /// Pra conexões lentas (relay do Radmin, internet fraca)
+    Economica,
     Leve,
     Equilibrada,
     Maxima,
@@ -59,6 +61,7 @@ pub struct PresetSpec {
 impl Preset {
     pub fn spec(self) -> PresetSpec {
         match self {
+            Preset::Economica => PresetSpec { max_height: 720, fps: 30, kbps: 2_500 },
             Preset::Leve => PresetSpec { max_height: 1080, fps: 30, kbps: 6_000 },
             Preset::Equilibrada => PresetSpec { max_height: 1080, fps: 60, kbps: 10_000 },
             Preset::Maxima => PresetSpec { max_height: 1440, fps: 60, kbps: 15_000 },
@@ -100,23 +103,42 @@ pub async fn detect_encoder(ffmpeg: &Path) -> Encoder {
 }
 
 /// Monta a linha de comando do FFmpeg. Separado pra dar pra testar.
-pub fn ffmpeg_args(source: &Source, preset: Preset, encoder: Encoder, rtp_port: u16) -> Vec<String> {
+/// Tamanho de saída: no máximo a altura do preset, mantendo a proporção,
+/// nunca maior que a original, sempre par (exigência do H.264).
+pub fn output_size(src: (u32, u32), max_height: u32) -> (u32, u32) {
+    let (w, h) = (src.0.max(2), src.1.max(2));
+    let even = |v: u32| (v.max(2)) & !1;
+    if h <= max_height {
+        return (even(w), even(h));
+    }
+    let nh = max_height;
+    let nw = ((w as u64 * nh as u64 + h as u64 / 2) / h as u64) as u32;
+    (even(nw), even(nh))
+}
+
+/// Monta a linha de comando do FFmpeg. `src_size` é o tamanho real da tela ou
+/// janela (quando conhecido). Separado pra dar pra testar.
+pub fn ffmpeg_args(source: &Source, src_size: Option<(u32, u32)>, preset: Preset, encoder: Encoder, rtp_port: u16) -> Vec<String> {
     let spec = preset.spec();
     let fps = spec.fps;
     let kbps = spec.kbps;
-    let gop = fps * 2; // um quadro-chave a cada 2 s: quem entra no meio espera no máximo isso
+    let gop = fps; // um quadro-chave por segundo: imagem volta rápido se algo se perder
 
     // Captura via Windows Graphics Capture, direto na GPU, sem borda amarela.
     let target = match source {
         Source::Monitor { handle } => format!("hmonitor={handle}"),
         Source::Window { hwnd } => format!("hwnd={hwnd}"),
     };
-    // width/height negativos = "no máximo isso, mantendo proporção, múltiplo de 2"
-    let capture = format!(
-        "gfxcapture={target}:max_framerate={fps}:display_border=0:capture_cursor=1:dup_frames=1:height=-2:resize_mode=scale_aspect:scale_mode=bilinear"
+    let mut capture = format!(
+        "gfxcapture={target}:max_framerate={fps}:display_border=0:capture_cursor=1:dup_frames=1"
     );
-    // Limita a altura do preset sem sair da GPU
-    let capture = capture.replace("height=-2", &format!("height=-{}", spec.max_height));
+    // Redimensiona na própria GPU só quando precisa diminuir
+    if let Some(src) = src_size {
+        let (w, h) = output_size(src, spec.max_height);
+        if (w, h) != (src.0 & !1, src.1 & !1) || src.0 % 2 == 1 || src.1 % 2 == 1 {
+            capture.push_str(&format!(":width={w}:height={h}:resize_mode=scale_aspect:scale_mode=bilinear"));
+        }
+    }
 
     let mut filter = capture;
     match encoder {
@@ -295,10 +317,10 @@ mod tests {
     use super::*;
     #[test]
     fn args_nvenc_monitor() {
-        let a = ffmpeg_args(&Source::Monitor { handle: 65537 }, Preset::Maxima, Encoder::Nvenc, 5004);
+        let a = ffmpeg_args(&Source::Monitor { handle: 65537 }, Some((2560, 1440)), Preset::Maxima, Encoder::Nvenc, 5004);
         let line = a.join(" ");
         assert!(line.contains("gfxcapture=hmonitor=65537:max_framerate=60:display_border=0"));
-        assert!(line.contains("height=-1440"));
+        assert!(!line.contains("height="), "1440p na Máxima não precisa redimensionar");
         assert!(line.contains("-init_hw_device d3d11va=star -filter_hw_device star"));
         assert!(line.contains("-c:v h264_nvenc"));
         assert!(line.contains("-b:v 15000k"));
@@ -306,10 +328,24 @@ mod tests {
     }
     #[test]
     fn args_x264_window() {
-        let a = ffmpeg_args(&Source::Window { hwnd: 1234 }, Preset::Leve, Encoder::X264, 6000);
+        let a = ffmpeg_args(&Source::Window { hwnd: 1234 }, None, Preset::Leve, Encoder::X264, 6000);
         let line = a.join(" ");
         assert!(line.contains("hwnd=1234"));
         assert!(line.contains("hwdownload,format=bgra"));
-        assert!(line.contains("-g 60"));
+        assert!(line.contains("-g 30"));
+    }
+
+    #[test]
+    fn tamanhos() {
+        // O bug: tela 1080p na Máxima virava 1920x0
+        assert_eq!(output_size((1920, 1080), 1440), (1920, 1080));
+        assert_eq!(output_size((2560, 1440), 1080), (1920, 1080));
+        assert_eq!(output_size((1920, 1080), 720), (1280, 720));
+        assert_eq!(output_size((3440, 1440), 1080), (2580, 1080));
+        assert_eq!(output_size((1001, 777), 1080), (1000, 776)); // janela ímpar
+        let a = ffmpeg_args(&Source::Monitor { handle: 1 }, Some((1920, 1080)), Preset::Maxima, Encoder::Nvenc, 1).join(" ");
+        assert!(!a.contains("height="));
+        let b = ffmpeg_args(&Source::Monitor { handle: 1 }, Some((1920, 1080)), Preset::Economica, Encoder::Nvenc, 1).join(" ");
+        assert!(b.contains(":width=1280:height=720:"));
     }
 }
