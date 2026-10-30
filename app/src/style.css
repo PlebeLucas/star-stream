@@ -119,6 +119,10 @@ input[type=range] { accent-color: var(--acc); }
 .icon-btn { width: 44px; height: 44px; display: grid; place-items: center; background: transparent; border: 1px solid var(--line); cursor: pointer; }
 .icon-btn .ico { color: var(--text); }
 
+/* caixinha do aviso */
+.check { display: flex; align-items: center; gap: 10px; min-height: 44px; font-size: 14px; color: var(--muted); cursor: pointer; }
+.check input { width: 18px; height: 18px; accent-color: var(--acc); }
+
 /* login */
 #screen-login { display: grid; place-items: center; padding: 24px; }
 .login-card { width: min(520px, 100%); padding: 36px; background: var(--panel); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 22px; }

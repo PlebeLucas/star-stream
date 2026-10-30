@@ -259,7 +259,8 @@ export class Room {
       const wasLive = !!me.live;
       me.live = msg.on ? { since: Date.now(), info: String(msg.info || '').slice(0, 120) } : null;
       this.broadcastPresence();
-      if (msg.on && !wasLive) this.announce(me.user.name, me.live.info);
+      // notify: false = o transmissor desligou o aviso (ou é só uma reconexão)
+      if (msg.on && !wasLive && msg.notify !== false) this.announce(me.user.name, me.live.info);
       return;
     }
 

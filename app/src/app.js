@@ -39,6 +39,7 @@ const S = {
     audio: store.get('audio') || 'pc',
     appPid: null,
     volume: Number(store.get('volume') || 100),
+    notify: store.get('notify') !== '0',
   },
   live: false,
   liveSince: 0,
@@ -193,8 +194,8 @@ function onRoomMessage(m) {
       setNet('ok', 'SERVIDOR ONLINE');
       $('me-name').textContent = m.you.user.name;
       if (m.you.user.avatar) $('me-avatar').src = m.you.user.avatar;
-      // Reconectou no meio de uma live: avisa a sala de novo
-      if (S.live) send({ t: 'live', on: true, info: liveInfo() });
+      // Reconectou no meio de uma live: volta pra lista de "ao vivo", sem avisar no Discord de novo
+      if (S.live) send({ t: 'live', on: true, info: liveInfo(), notify: false });
       break;
     case 'presence':
       S.peers = m.peers || [];
@@ -365,6 +366,12 @@ for (const b of document.querySelectorAll('[data-preset]')) {
     renderConfig();
   });
 }
+$('notify').checked = S.cfg.notify;
+$('notify').addEventListener('change', (e) => {
+  S.cfg.notify = e.target.checked;
+  store.set('notify', S.cfg.notify ? '1' : '0');
+});
+
 $('vol').addEventListener('input', (e) => {
   S.cfg.volume = Number(e.target.value);
   store.set('volume', String(S.cfg.volume));
@@ -413,7 +420,7 @@ async function goLive() {
   S.live = true;
   S.liveSince = Date.now();
   S.viewers.clear();
-  send({ t: 'live', on: true, info: liveInfo() });
+  send({ t: 'live', on: true, info: liveInfo(), notify: S.cfg.notify });
 
   $('live-src').textContent = S.cfg.source.name;
   $('live-src2').textContent = S.cfg.source.name.toUpperCase();

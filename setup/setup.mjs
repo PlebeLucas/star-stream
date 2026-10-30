@@ -165,6 +165,10 @@ async function publish() {
   const [a, b, p] = c.version.split('.').map(Number);
   const next = `${a}.${b}.${p + 1}`;
   console.log(`\n${R}${B}STAR // STREAM${X} — publicando versão ${B}${next}${X} (era ${c.version})`);
+  info('Atualizando o servidor de encontro…');
+  await run('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: SIGNAL, quiet: true });
+  await wrangler(['deploy'], { quiet: true });
+  ok('Servidor de encontro atualizado');
   c.version = next;
   writeJson(tauriConf, c);
   const cargo = join(APP, 'src-tauri', 'Cargo.toml');

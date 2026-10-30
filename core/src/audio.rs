@@ -442,10 +442,17 @@ mod platform {
     static ACTIVATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Abre a captura do som de UMA árvore de processos.
-    fn activate(pid: u32) -> windows::core::Result<IAudioClient> {
+    /// Objetos do pedido ao Windows: ficam vivos enquanto a captura roda e
+    /// nunca são "devolvidos" (soltar no fim da ativação derrubava o app).
+    struct Keep {
+        _op: ManuallyDrop<IActivateAudioInterfaceAsyncOperation>,
+        _handler: ManuallyDrop<IActivateAudioInterfaceCompletionHandler>,
+    }
+
+    fn activate(pid: u32) -> windows::core::Result<(IAudioClient, Keep)> {
         let _one_at_a_time = ACTIVATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
-            let params = AUDIOCLIENT_ACTIVATION_PARAMS {
+            let params: &'static AUDIOCLIENT_ACTIVATION_PARAMS = Box::leak(Box::new(AUDIOCLIENT_ACTIVATION_PARAMS {
                 ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
                 Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
                     ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
@@ -453,8 +460,8 @@ mod platform {
                         ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
                     },
                 },
-            };
-            let prop = PROPVARIANT {
+            }));
+            let prop: &'static PROPVARIANT = Box::leak(Box::new(PROPVARIANT {
                 Anonymous: PROPVARIANT_0 {
                     Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
                         vt: VT_BLOB,
@@ -464,16 +471,18 @@ mod platform {
                         Anonymous: PROPVARIANT_0_0_0 {
                             blob: BLOB {
                                 cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                                pBlobData: &params as *const _ as *mut u8,
+                                pBlobData: params as *const _ as *mut u8,
                             },
                         },
                     }),
                 },
-            };
+            }));
             let event = CreateEventW(None, false, false, None)?;
-            let handler: IActivateAudioInterfaceCompletionHandler = Done(event).into();
+            // ManuallyDrop: nunca solta, nem se der erro no meio do caminho
+            let handler: ManuallyDrop<IActivateAudioInterfaceCompletionHandler> = ManuallyDrop::new(Done(event).into());
             log::debug!(target: "star::audio", "processo {pid}: pedindo captura ao Windows");
-            let op = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, &IAudioClient::IID, Some(&prop), &handler)?;
+            let op = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, &IAudioClient::IID, Some(prop as *const PROPVARIANT), &*handler)?;
+            let op = ManuallyDrop::new(op);
             let w = WaitForSingleObject(event, 5_000);
             log::debug!(target: "star::audio", "processo {pid}: Windows respondeu ({})", w.0);
             let _ = CloseHandle(event);
@@ -484,7 +493,7 @@ mod platform {
             hr.ok()?;
             let client: IAudioClient = unk.ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?.cast()?;
             log::debug!(target: "star::audio", "processo {pid}: cliente de áudio pronto");
-            Ok(client)
+            Ok((client, Keep { _op: op, _handler: handler }))
         }
     }
 
@@ -492,7 +501,7 @@ mod platform {
     pub fn capture_source(pid: u32, stop: Arc<AtomicBool>, buf: SharedBuf) {
         com_init();
         let r = (|| -> windows::core::Result<()> {
-            let client = activate(pid)?;
+            let (client, keep) = activate(pid)?;
             log::debug!(target: "star::audio", "processo {pid}: captura ativada");
             unsafe {
                 // Process loopback exige que a gente diga o formato: float 48 kHz estéreo
@@ -556,6 +565,8 @@ mod platform {
                 let _ = client.Stop();
                 let _ = CloseHandle(event);
             }
+            std::mem::forget(keep);
+            log::debug!(target: "star::audio", "processo {pid}: captura encerrada");
             Ok(())
         })();
         if let Err(e) = r {

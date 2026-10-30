@@ -210,6 +210,10 @@ impl VideoProcess {
             .creation_flags_no_window()
             .spawn()
             .context("não consegui iniciar o FFmpeg")?;
+        #[cfg(windows)]
+        if let Some(h) = child.raw_handle() {
+            job::bind_to_app(h);
+        }
         Ok(Self { child })
     }
 
@@ -221,6 +225,46 @@ impl VideoProcess {
         }
         if tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait()).await.is_err() {
             let _ = self.child.kill().await;
+        }
+    }
+}
+
+/// "Job" do Windows: tudo que entra nele morre quando o app fecha, mesmo se o
+/// app cair. Assim o ffmpeg.exe nunca fica preso rodando escondido.
+#[cfg(windows)]
+mod job {
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    struct Job(HANDLE);
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+    static JOB: OnceLock<Option<Job>> = OnceLock::new();
+
+    pub fn bind_to_app(process: std::os::windows::io::RawHandle) {
+        let job = JOB.get_or_init(|| unsafe {
+            let h = CreateJobObjectW(None, None).ok()?;
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                h,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+            .ok()?;
+            Some(Job(h)) // o handle fica aberto até o app fechar, de propósito
+        });
+        if let Some(Job(h)) = job {
+            unsafe {
+                if let Err(e) = AssignProcessToJobObject(*h, HANDLE(process)) {
+                    log::warn!(target: "star::video", "não consegui amarrar o FFmpeg ao app: {e}");
+                }
+            }
         }
     }
 }
