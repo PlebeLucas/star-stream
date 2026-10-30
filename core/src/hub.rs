@@ -214,6 +214,7 @@ impl Hub {
                 Ok(())
             }
             Signal::Ice { candidate } => {
+                log::info!(target: "star::hub", "candidato de {from}: {}", candidate.candidate);
                 let pc = self.peer(from).await?;
                 pc.add_ice_candidate(candidate).await?;
                 Ok(())
@@ -253,6 +254,7 @@ impl Hub {
             let to = to.clone();
             Box::pin(async move {
                 if let Some(c) = c {
+                    log::info!(target: "star::hub", "meu candidato: {c}");
                     if let Ok(init) = c.to_json() {
                         let _ = ev.send(HubEvent::Signal { to, data: Signal::Ice { candidate: init } });
                     }
@@ -268,6 +270,7 @@ impl Hub {
             let hub = hub.clone();
             let who = who.clone();
             Box::pin(async move {
+                log::info!(target: "star::hub", "espectador {who}: {s}");
                 let _ = ev.send(HubEvent::ViewerState { peer: who.clone(), state: s.to_string() });
                 if matches!(s, RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed) {
                     if let Some(h) = hub.upgrade() {

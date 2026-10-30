@@ -533,13 +533,19 @@ function startWatching(peer) {
     video.play().catch(() => {});
   };
   pc.onicecandidate = (ev) => {
+    if (ev.candidate) jsLog('info', 'assistir: meu candidato ' + ev.candidate.candidate);
     if (ev.candidate) sendSignal(w.peerId, { kind: 'ice', candidate: ev.candidate.toJSON() }, 'v');
   };
   pc.onconnectionstatechange = () => {
     const st = pc.connectionState;
     if (st === 'connected') $('watch-msg').textContent = '';
     if (st === 'connecting') $('watch-msg').textContent = 'CONECTANDO…';
-    if (st === 'failed') $('watch-msg').textContent = 'NÃO CONSEGUI CONECTAR NO PC DE QUEM TRANSMITE. Veja o README (relay reserva).';
+    jsLog('info', 'assistir: conexão ' + st);
+    if (st === 'connected') logPair(pc);
+    if (st === 'failed') {
+      $('watch-msg').textContent = 'NÃO CONSEGUI CONECTAR. Confiram se os dois estão com o Radmin VPN ligado e na mesma rede.';
+      logPair(pc);
+    }
     if (st === 'disconnected') $('watch-msg').textContent = 'CONEXÃO OSCILANDO…';
   };
 
@@ -566,6 +572,24 @@ function startWatching(peer) {
   }, 1000);
 }
 
+// Registra no diagnóstico por qual caminho a conexão foi (ou tentou ir)
+async function logPair(pc) {
+  try {
+    const r = await pc.getStats();
+    const all = {};
+    r.forEach((x) => (all[x.id] = x));
+    Object.values(all)
+      .filter((x) => x.type === 'candidate-pair')
+      .forEach((p) => {
+        const l = all[p.localCandidateId] || {};
+        const rm = all[p.remoteCandidateId] || {};
+        jsLog('info', `par ${p.state}${p.nominated ? ' (escolhido)' : ''}: ${l.address || '?'}:${l.port} ${l.candidateType} -> ${rm.address || '?'}:${rm.port} ${rm.candidateType}`);
+      });
+  } catch (e) {
+    jsLog('warn', 'getStats: ' + e);
+  }
+}
+
 async function onViewerSignal(data) {
   const w = S.watch;
   if (!w) return;
@@ -578,6 +602,7 @@ async function onViewerSignal(data) {
       await w.pc.setLocalDescription(answer);
       sendSignal(w.peerId, { kind: 'answer', sdp: answer.sdp }, 'v');
     } else if (data.kind === 'ice') {
+      jsLog('info', 'assistir: candidato de quem transmite ' + (data.candidate && data.candidate.candidate));
       if (w.remoteSet) await w.pc.addIceCandidate(data.candidate).catch(() => {});
       else w.pendingIce.push(data.candidate);
     }

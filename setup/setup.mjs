@@ -170,6 +170,10 @@ async function publish() {
   await wrangler(['deploy'], { quiet: true });
   ok('Servidor de encontro atualizado');
   c.version = next;
+  // Libera todas as placas de rede (inclui Radmin VPN) pro WebRTC de quem assiste
+  c.app.windows[0].additionalBrowserArgs =
+    '--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,WebRtcHideLocalIpsWithMdns ' +
+    '--force-webrtc-ip-handling-policy=default --autoplay-policy=no-user-gesture-required';
   writeJson(tauriConf, c);
   const cargo = join(APP, 'src-tauri', 'Cargo.toml');
   writeFileSync(cargo, readFileSync(cargo, 'utf8').replace(/^version = ".*"$/m, `version = "${next}"`));
