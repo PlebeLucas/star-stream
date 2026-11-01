@@ -30,6 +30,12 @@ pub fn thumbnail(kind: &str, handle: u64, max_w: u32, max_h: u32) -> Option<Stri
     Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(jpg)))
 }
 
+/// Retângulo na tela (esquerda, topo, largura, altura) do que está sendo
+/// capturado: o monitor inteiro ou a área interna da janela.
+pub fn capture_rect(src: &crate::video::Source) -> Option<(i32, i32, i32, i32)> {
+    platform::rect(src)
+}
+
 /// Tamanho atual (largura, altura) do monitor ou da janela, em pixels.
 pub fn source_size(src: &crate::video::Source) -> Option<(u32, u32)> {
     platform::size(src)
@@ -45,6 +51,9 @@ mod platform {
         None
     }
     pub fn grab(_k: &str, _h: u64, _w: u32, _hh: u32) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
+    pub fn rect(_s: &crate::video::Source) -> Option<(i32, i32, i32, i32)> {
         None
     }
 }
@@ -64,10 +73,10 @@ mod platform {
     pub fn grab(kind: &str, handle: u64, max_w: u32, max_h: u32) -> Option<(u32, u32, Vec<u8>)> {
         use windows::Win32::Graphics::Gdi::*;
         use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
-        let src = if kind == "monitor" {
-            crate::video::Source::Monitor { handle }
-        } else {
-            crate::video::Source::Window { hwnd: handle }
+        let src = match kind {
+            "monitor" => crate::video::Source::Monitor { handle },
+            "window" => crate::video::Source::Window { hwnd: handle },
+            _ => return None,
         };
         let (sw, sh) = size(&src)?;
         // Tamanho da miniatura mantendo a proporção
@@ -124,6 +133,34 @@ mod platform {
         }
     }
 
+    pub fn rect(src: &crate::video::Source) -> Option<(i32, i32, i32, i32)> {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::Graphics::Gdi::ClientToScreen;
+        unsafe {
+            match src {
+                crate::video::Source::Monitor { handle } => {
+                    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+                    if !GetMonitorInfoW(HMONITOR(*handle as _), &mut info).as_bool() {
+                        return None;
+                    }
+                    let r = info.rcMonitor;
+                    Some((r.left, r.top, r.right - r.left, r.bottom - r.top))
+                }
+                crate::video::Source::Window { hwnd } => {
+                    let h = HWND(*hwnd as _);
+                    let mut r = RECT::default();
+                    GetClientRect(h, &mut r).ok()?;
+                    let mut p = POINT { x: 0, y: 0 };
+                    if !ClientToScreen(h, &mut p).as_bool() {
+                        return None;
+                    }
+                    Some((p.x, p.y, r.right - r.left, r.bottom - r.top))
+                }
+                crate::video::Source::Webcam { .. } => None,
+            }
+        }
+    }
+
     pub fn size(src: &crate::video::Source) -> Option<(u32, u32)> {
         unsafe {
             let r = match src {
@@ -139,6 +176,7 @@ mod platform {
                     GetClientRect(HWND(*hwnd as _), &mut r).ok()?;
                     r
                 }
+                crate::video::Source::Webcam { .. } => return None,
             };
             let (w, h) = ((r.right - r.left).max(0) as u32, (r.bottom - r.top).max(0) as u32);
             (w > 0 && h > 0).then_some((w, h))
@@ -164,12 +202,54 @@ mod platform {
         true.into()
     }
 
+    /// Mesma regra do Alt+Tab: só janelas de verdade, visíveis pro usuário.
+    unsafe fn is_alt_tab_window(h: HWND) -> bool {
+        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetAncestor, GetClassNameW, GetLastActivePopup, GetWindow, GA_ROOTOWNER, GW_OWNER, WS_EX_APPWINDOW,
+            WS_EX_NOACTIVATE,
+        };
+        if !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
+            return false;
+        }
+        // "Escondida" pelo Windows: apps como Configurações ficam abertos e invisíveis
+        let mut cloaked = 0u32;
+        if DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, 4).is_ok() && cloaked != 0 {
+            return false;
+        }
+        let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+        if ex & WS_EX_APPWINDOW.0 == 0 {
+            if ex & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0 {
+                return false;
+            }
+            // Janelas "filhas" de outra (diálogos, popups) ficam de fora
+            if GetWindow(h, GW_OWNER).is_ok_and(|o| !o.is_invalid()) {
+                return false;
+            }
+            // Regra do Alt+Tab: a janela tem que ser a ponta da sua cadeia de popups
+            let root = GetAncestor(h, GA_ROOTOWNER);
+            if !root.is_invalid() && GetLastActivePopup(root) != h && root != h {
+                return false;
+            }
+        }
+        // Janelas internas de apps da loja (o quadro de fora é que aparece)
+        let mut cls = [0u16; 128];
+        let n = GetClassNameW(h, &mut cls);
+        let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+        if matches!(cls.as_str(), "Windows.UI.Core.CoreWindow" | "Progman" | "WorkerW" | "Shell_TrayWnd") {
+            return false;
+        }
+        // Tamanho mínimo: ignora janelas fantasmas de 0 a poucos pixels
+        let mut r = RECT::default();
+        if GetClientRect(h, &mut r).is_err() || r.right - r.left < 120 || r.bottom - r.top < 80 {
+            return false;
+        }
+        true
+    }
+
     unsafe extern "system" fn on_window(h: HWND, data: LPARAM) -> BOOL {
         let out = &mut *(data.0 as *mut Vec<SourceInfo>);
-        if !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
-            return true.into();
-        }
-        if (GetWindowLongW(h, GWL_EXSTYLE) as u32) & WS_EX_TOOLWINDOW.0 != 0 {
+        if !is_alt_tab_window(h) {
             return true.into();
         }
         let len = GetWindowTextLengthW(h);
@@ -184,6 +264,9 @@ mod platform {
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(h, Some(&mut pid));
+        if pid == std::process::id() {
+            return true.into();
+        }
         out.push(SourceInfo { kind: "window".into(), handle: h.0 as u64, name: title, detail: "Janela".into(), pid });
         true.into()
     }

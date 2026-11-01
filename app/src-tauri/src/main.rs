@@ -3,13 +3,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod diag;
+mod interact;
 
 use serde::Serialize;
 use star_core::audio::{list_audio_apps, AudioApp};
 use star_core::hub::{HubEvent, IceServer, Signal};
 use star_core::session::{LiveConfig, LiveSession};
 use star_core::sources::{self, SourceInfo};
-use star_core::video::{detect_encoder, Encoder};
+use star_core::video::{detect_encoder, list_webcams, webcam_snapshot, Encoder};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
@@ -17,10 +18,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 
 #[derive(Default)]
-struct AppState {
+pub struct AppState {
     /// Link starstream:// que abriu o app, esperando a interface pegar
     pending_url: std::sync::Mutex<Option<String>>,
-    live: Mutex<Option<Arc<LiveSession>>>,
+    pub live: Mutex<Option<Arc<LiveSession>>>,
     encoder: Mutex<Option<Encoder>>,
 }
 
@@ -36,7 +37,7 @@ fn ffmpeg_path(app: &tauri::AppHandle) -> PathBuf {
     PathBuf::from(exe)
 }
 
-fn err(e: impl std::fmt::Display) -> String {
+pub fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
@@ -107,6 +108,18 @@ async fn source_thumb(kind: String, handle: u64, w: u32, h: u32) -> Option<Strin
     tokio::task::spawn_blocking(move || sources::thumbnail(&kind, handle, w, h)).await.ok().flatten()
 }
 
+/// Webcams conectadas.
+#[tauri::command]
+async fn webcams(app: tauri::AppHandle) -> Vec<String> {
+    list_webcams(&ffmpeg_path(&app)).await
+}
+
+/// Uma foto da webcam pra prévia (liga a câmera por ~1 s).
+#[tauri::command]
+async fn webcam_thumb(app: tauri::AppHandle, name: String) -> Option<String> {
+    webcam_snapshot(&ffmpeg_path(&app), &name).await
+}
+
 /// A interface pega o link que abriu o app (se houver) quando fica pronta.
 #[tauri::command]
 fn take_pending_url(state: State<'_, AppState>) -> Option<String> {
@@ -158,6 +171,7 @@ async fn encoder_info(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
 async fn go_live(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    remote: State<'_, Arc<star_core::remote::Remote>>,
     config: LiveConfig,
     ice: Vec<IceServer>,
 ) -> Result<(), String> {
@@ -168,7 +182,8 @@ async fn go_live(
     let enc = encoder_info(app.clone(), state.clone()).await?.id;
     log::info!(target: "star", "encoder: {enc:?}, ffmpeg: {}", ffmpeg_path(&app).display());
     let (tx, mut rx) = mpsc::unbounded_channel::<HubEvent>();
-    let session = LiveSession::start(config, ffmpeg_path(&app), enc, ice, tx).await.map_err(|e| {
+    remote.revoke("a live recomeçou");
+    let session = LiveSession::start(config, ffmpeg_path(&app), enc, ice, tx, Some(remote.inner().clone())).await.map_err(|e| {
         log::error!(target: "star", "go_live falhou: {e:#}");
         err(e)
     })?;
@@ -188,7 +203,9 @@ async fn go_live(
 }
 
 #[tauri::command]
-async fn stop_live(state: State<'_, AppState>) -> Result<(), String> {
+async fn stop_live(app: tauri::AppHandle, state: State<'_, AppState>, remote: State<'_, Arc<star_core::remote::Remote>>) -> Result<(), String> {
+    remote.revoke("a live terminou");
+    interact::overlay_hide(app);
     if let Some(s) = state.live.lock().await.take() {
         s.stop().await;
     }
@@ -287,6 +304,10 @@ fn main() {
             }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_update(handle));
+            let (remote, ended) = star_core::remote::Remote::new();
+            let remote = Arc::new(remote);
+            interact::start_background(app.handle(), remote.clone(), ended);
+            app.manage(remote);
             Ok(())
         })
         .manage(AppState::default())
@@ -304,7 +325,17 @@ fn main() {
             open_log_folder,
             js_log,
             source_thumb,
-            take_pending_url
+            take_pending_url,
+            webcams,
+            webcam_thumb,
+            interact::overlay_show,
+            interact::overlay_hide,
+            interact::hub_broadcast,
+            interact::hub_send,
+            interact::clip_save,
+            interact::open_clips_folder,
+            interact::remote_grant,
+            interact::remote_revoke
         ])
         .build(tauri::generate_context!())
         .expect("erro ao iniciar o STAR // STREAM")

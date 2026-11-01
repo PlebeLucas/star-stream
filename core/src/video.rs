@@ -59,6 +59,16 @@ pub struct PresetSpec {
 }
 
 impl Preset {
+    /// Um degrau abaixo (None se já é a mais leve)
+    pub fn lower(self) -> Option<Preset> {
+        match self {
+            Preset::Maxima => Some(Preset::Equilibrada),
+            Preset::Equilibrada => Some(Preset::Leve),
+            Preset::Leve => Some(Preset::Economica),
+            Preset::Economica => None,
+        }
+    }
+
     pub fn spec(self) -> PresetSpec {
         match self {
             Preset::Economica => PresetSpec { max_height: 720, fps: 30, kbps: 2_500 },
@@ -77,6 +87,8 @@ pub enum Source {
     Monitor { handle: u64 },
     /// Uma janela específica (HWND)
     Window { hwnd: u64 },
+    /// Webcam (nome do dispositivo no Windows)
+    Webcam { name: String },
 }
 
 /// Descobre qual encoder de hardware funciona de verdade nesse PC,
@@ -120,58 +132,75 @@ pub fn output_size(src: (u32, u32), max_height: u32) -> (u32, u32) {
 /// janela (quando conhecido). Separado pra dar pra testar.
 pub fn ffmpeg_args(source: &Source, src_size: Option<(u32, u32)>, preset: Preset, encoder: Encoder, rtp_port: u16) -> Vec<String> {
     let spec = preset.spec();
-    let fps = spec.fps;
     let kbps = spec.kbps;
-    let gop = fps; // um quadro-chave por segundo: imagem volta rápido se algo se perder
+    // Webcam quase sempre entrega no máximo 30 quadros por segundo
+    let fps = if matches!(source, Source::Webcam { .. }) { spec.fps.min(30) } else { spec.fps };
+    let gop = fps * 2; // quadro-chave a cada 2 s (pacotes perdidos são reenviados antes disso)
 
-    // Captura via Windows Graphics Capture, direto na GPU, sem borda amarela.
-    let target = match source {
-        Source::Monitor { handle } => format!("hmonitor={handle}"),
-        Source::Window { hwnd } => format!("hwnd={hwnd}"),
-    };
-    let mut capture = format!(
-        "gfxcapture={target}:max_framerate={fps}:display_border=0:capture_cursor=1:dup_frames=1"
-    );
-    // Redimensiona na própria GPU só quando precisa diminuir
-    if let Some(src) = src_size {
-        let (w, h) = output_size(src, spec.max_height);
-        if (w, h) != (src.0 & !1, src.1 & !1) || src.0 % 2 == 1 || src.1 % 2 == 1 {
-            capture.push_str(&format!(":width={w}:height={h}:resize_mode=scale_aspect:scale_mode=bilinear"));
+    let mut a: Vec<String> = ["-hide_banner", "-loglevel", "warning", "-stats_period", "1", "-progress", "pipe:1"]
+        .map(String::from)
+        .to_vec();
+
+    match source {
+        Source::Webcam { name } => {
+            // A câmera entrega a imagem na memória: reduz, acerta o ritmo e converte.
+            let pix = if encoder == Encoder::X264 { "yuv420p" } else { "nv12" };
+            let max_h = spec.max_height;
+            a.extend([
+                "-f".into(),
+                "dshow".into(),
+                "-rtbufsize".into(),
+                "64M".into(),
+                "-i".into(),
+                format!("video={name}"),
+                "-an".into(),
+                "-vf".into(),
+                format!("scale=w=-2:h=min(ih\\,{max_h}):flags=bilinear,fps={fps},format={pix}"),
+            ]);
+        }
+        Source::Monitor { .. } | Source::Window { .. } => {
+            // Captura via Windows Graphics Capture, direto na GPU, sem borda amarela.
+            let target = match source {
+                Source::Monitor { handle } => format!("hmonitor={handle}"),
+                Source::Window { hwnd } => format!("hwnd={hwnd}"),
+                Source::Webcam { .. } => unreachable!(),
+            };
+            let mut filter = format!(
+                "gfxcapture={target}:max_framerate={fps}:display_border=0:capture_cursor=1:dup_frames=1"
+            );
+            // Redimensiona na própria GPU só quando precisa diminuir
+            if let Some(src) = src_size {
+                let (w, h) = output_size(src, spec.max_height);
+                if (w, h) != (src.0 & !1, src.1 & !1) || src.0 % 2 == 1 || src.1 % 2 == 1 {
+                    filter.push_str(&format!(":width={w}:height={h}:resize_mode=scale_aspect:scale_mode=bilinear"));
+                }
+            }
+            match encoder {
+                // NVENC e AMF aceitam a textura D3D11 direto (zero cópia)
+                Encoder::Nvenc | Encoder::Amf => {}
+                Encoder::Qsv => filter.push_str(",hwmap=derive_device=qsv,format=qsv"),
+                Encoder::X264 => filter.push_str(",hwdownload,format=bgra,format=yuv420p"),
+            }
+            a.extend([
+                // Dispositivo da GPU com nome próprio ("star"): sem nome o FFmpeg chama de "d3d11va0"
+                "-init_hw_device".into(),
+                "d3d11va=star".into(),
+                "-filter_hw_device".into(),
+                "star".into(),
+                "-f".into(),
+                "lavfi".into(),
+                "-i".into(),
+                filter,
+                "-an".into(),
+            ]);
         }
     }
-
-    let mut filter = capture;
-    match encoder {
-        // NVENC e AMF aceitam a textura D3D11 direto (zero cópia)
-        Encoder::Nvenc | Encoder::Amf => {}
-        Encoder::Qsv => filter.push_str(",hwmap=derive_device=qsv,format=qsv"),
-        Encoder::X264 => filter.push_str(",hwdownload,format=bgra,format=yuv420p"),
-    }
-
-    let mut a: Vec<String> = vec![
-        "-hide_banner".into(),
-        "-loglevel".into(),
-        "warning".into(),
-        "-stats_period".into(),
-        "1".into(),
-        "-progress".into(),
-        "pipe:1".into(),
-        // Dispositivo da GPU com nome próprio ("star"): sem nome o FFmpeg chama de "d3d11va0"
-        "-init_hw_device".into(),
-        "d3d11va=star".into(),
-        "-filter_hw_device".into(),
-        "star".into(),
-        "-f".into(),
-        "lavfi".into(),
-        "-i".into(),
-        filter,
-        "-an".into(),
-        "-c:v".into(),
-        encoder.ffmpeg_name().into(),
-    ];
+    a.extend(["-c:v".into(), encoder.ffmpeg_name().into()]);
 
     let bitrate = format!("{kbps}k");
-    let bufsize = format!("{}k", kbps / 2); // buffer curto = pouca latência
+    // Buffer de ~100 ms: limita o tamanho de cada quadro (inclusive o quadro-chave),
+    // então o fluxo sai liso em vez de picos que a internet de quem assiste não aguenta.
+    let bufsize = format!("{}k", (kbps / 10).max(200));
     match encoder {
         Encoder::Nvenc => a.extend(
             [
@@ -211,6 +240,57 @@ pub fn ffmpeg_args(source: &Source, src_size: Option<(u32, u32)>, preset: Preset
         format!("rtp://127.0.0.1:{rtp_port}?pkt_size=1200"),
     ]);
     a
+}
+
+/// Webcams conectadas (nomes como o Windows mostra).
+pub async fn list_webcams(ffmpeg: &Path) -> Vec<String> {
+    let out = Command::new(ffmpeg)
+        .args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .creation_flags_no_window()
+        .output()
+        .await;
+    match out {
+        Ok(o) => parse_webcams(&String::from_utf8_lossy(&o.stderr)),
+        Err(_) => vec![],
+    }
+}
+
+/// Lê a saída do `ffmpeg -list_devices`: linhas tipo `"HD Webcam" (video)`.
+pub fn parse_webcams(text: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    for line in text.lines() {
+        let Some(end) = line.rfind("\" (video)") else { continue };
+        let Some(start) = line[..end].find('"') else { continue };
+        let name = &line[start + 1..end];
+        if !name.is_empty() && !v.iter().any(|n: &String| n == name) {
+            v.push(name.to_string());
+        }
+    }
+    v
+}
+
+/// Uma foto da webcam (JPEG pequeno, como data URL) pra prévia.
+pub async fn webcam_snapshot(ffmpeg: &Path, name: &str) -> Option<String> {
+    let fut = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-f", "dshow", "-i"])
+        .arg(format!("video={name}"))
+        .args(["-frames:v", "1", "-vf", "scale=w=640:h=-2", "-q:v", "6", "-f", "image2pipe", "-c:v", "mjpeg", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .creation_flags_no_window()
+        .output();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(6), fut).await.ok()?.ok()?;
+    if out.stdout.len() < 100 {
+        return None;
+    }
+    use base64::Engine;
+    Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&out.stdout)))
 }
 
 /// Processo do FFmpeg em execução.
@@ -298,7 +378,7 @@ pub fn default_ffmpeg_path(app_dir: &Path) -> PathBuf {
 }
 
 /// Esconde a janela de console do FFmpeg no Windows.
-trait NoWindow {
+pub(crate) trait NoWindow {
     fn creation_flags_no_window(&mut self) -> &mut Self;
 }
 impl NoWindow for Command {
@@ -332,7 +412,8 @@ mod tests {
         let line = a.join(" ");
         assert!(line.contains("hwnd=1234"));
         assert!(line.contains("hwdownload,format=bgra"));
-        assert!(line.contains("-g 30"));
+        assert!(line.contains("-g 60"));
+        assert!(line.contains("-bufsize 600k"));
     }
 
     #[test]
@@ -347,5 +428,27 @@ mod tests {
         assert!(!a.contains("height="));
         let b = ffmpeg_args(&Source::Monitor { handle: 1 }, Some((1920, 1080)), Preset::Economica, Encoder::Nvenc, 1).join(" ");
         assert!(b.contains(":width=1280:height=720:"));
+    }
+
+    #[test]
+    fn webcam() {
+        let a = ffmpeg_args(&Source::Webcam { name: "HD Webcam".into() }, None, Preset::Equilibrada, Encoder::Nvenc, 9);
+        let line = a.join(" ");
+        assert!(line.contains("-f dshow -rtbufsize 64M -i video=HD Webcam"));
+        assert!(line.contains("scale=w=-2:h=min(ih\\,1080):flags=bilinear,fps=30,format=nv12"));
+        assert!(!line.contains("gfxcapture"));
+        assert!(line.contains("-g 60"));
+        // argumento único (sem shell): o nome com espaço não quebra
+        assert!(a.iter().any(|x| x == "video=HD Webcam"));
+    }
+
+    #[test]
+    fn lista_webcams() {
+        let out = r#"[in#0 @ 000001] "HD Pro Webcam C920" (video)
+[in#0 @ 000001]   Alternative name "@device_pnp_\\?\usb#vid_046d"
+[in#0 @ 000001] "Microfone (C920)" (audio)
+[dshow @ 000002] "OBS Virtual Camera" (video)
+[in#0 @ 000001] "HD Pro Webcam C920" (video)"#;
+        assert_eq!(parse_webcams(out), vec!["HD Pro Webcam C920".to_string(), "OBS Virtual Camera".to_string()]);
     }
 }

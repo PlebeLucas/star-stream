@@ -19,6 +19,12 @@ Transmissão de tela privada da STAR Corp. Só entra quem é membro do servidor 
 
 Pronto. Pra assistir alguém, clique em **ASSISTIR**. Pra transmitir, escolha a tela e clique em **INICIAR TRANSMISSÃO**. Dá pra fazer os dois ao mesmo tempo: assistir um amigo enquanto está ao vivo.
 
+**Interação** (barra embaixo do vídeo de quem assiste):
+- **Reações:** FOGO, KKKKK, GG, SUSTO, BRABO. Aparecem pra quem transmite e pra todo mundo assistindo.
+- **PING** (ou tecla **P**): clique no vídeo e aparece um marcador naquele ponto da tela de quem transmite.
+- **CLIPA ISSO:** salva os últimos 30 s no PC de quem transmite, em `Vídeos\STAR Stream`.
+- **PEDIR CONTROLE:** quem transmite aceita (5 ou 15 min) e você usa o mouse e o teclado dele dentro da área transmitida. **Ctrl+Alt+X** corta na hora, dos dois lados.
+
 > Dica: se você transmite o **monitor inteiro** e abre a live de um amigo nesse mesmo monitor, seus espectadores veem a live dele dentro da sua. Pra evitar, transmita só a janela do jogo ou deixe o STAR Stream no outro monitor. O **som** da live do amigo nunca vai pra sua: o app exclui o próprio som automaticamente.
 
 > Na primeira instalação o Windows pode mostrar "O Windows protegeu o computador". É porque o app não tem certificado pago. Clique em **Mais informações → Executar assim mesmo**.

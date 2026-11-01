@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>STAR // STREAM overlay</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;700&family=JetBrains+Mono&display=swap">
+<link rel="stylesheet" href="fx.css">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  #root { position: fixed; inset: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="fx.js"></script>
+<script>
+  // Camada por cima da tela de quem transmite. Não recebe cliques e não entra na live.
+  const root = document.getElementById('root');
+  window.__TAURI__.event.listen('fx', ({ payload: m }) => {
+    if (!m) return;
+    if (m.t === 'ping') STARFX.ping(root, m.x, m.y, m.name);
+    else if (m.t === 'react') STARFX.react(root, m.e, m.name);
+    else if (m.t === 'flash') STARFX.flash(root, m.text, m.sub);
+    else if (m.t === 'banner') STARFX.banner(root, m.text, m.sub);
+  });
+</script>
+</body>
+</html>

@@ -41,6 +41,7 @@ const S = {
     appPid: null,
     volume: Number(store.get('volume') || 100),
     notify: store.get('notify') !== '0',
+    autoQuality: store.get('autoQuality') !== '0',
   },
   live: false,
   liveSince: 0,
@@ -281,11 +282,15 @@ let signalQueue = Promise.resolve();
 // ---------------- configurar ----------------
 
 async function refreshSources() {
-  try {
-    S.sources = await invoke('list_sources');
-  } catch {
-    S.sources = [];
-  }
+  let screens = [];
+  let cams = [];
+  try { screens = await invoke('list_sources'); } catch {}
+  try { cams = await invoke('webcams'); } catch {}
+  // Webcams entram na mesma lista, identificadas pelo nome
+  S.sources = [
+    ...screens,
+    ...cams.map((name) => ({ kind: 'webcam', handle: 'cam:' + name, name, detail: 'Webcam', pid: 0 })),
+  ];
   if (!S.cfg.source || !S.sources.some((s) => s.handle === S.cfg.source.handle)) {
     S.cfg.source = S.sources[0] || null;
   }
@@ -322,7 +327,7 @@ function renderSources() {
         el(
           'span',
           { class: 'meta' },
-          el('span', { class: 'kind' }, s.kind === 'monitor' ? 'TELA' : 'JANELA'),
+          el('span', { class: 'kind' }, { monitor: 'TELA', window: 'JANELA', webcam: 'WEBCAM' }[s.kind] || ''),
           el('span', { class: 'name' }, s.name),
         ),
       );
@@ -372,6 +377,11 @@ for (const b of document.querySelectorAll('[data-preset]')) {
     renderConfig();
   });
 }
+$('auto-quality').checked = S.cfg.autoQuality;
+$('auto-quality').addEventListener('change', (e) => {
+  S.cfg.autoQuality = e.target.checked;
+  store.set('autoQuality', S.cfg.autoQuality ? '1' : '0');
+});
 $('notify').checked = S.cfg.notify;
 $('notify').addEventListener('change', (e) => {
   S.cfg.notify = e.target.checked;
@@ -405,12 +415,16 @@ async function goLive() {
   const audio =
     S.cfg.audio === 'app' ? { mode: 'app', pid: S.cfg.appPid || 0 } : { mode: S.cfg.audio };
   const config = {
-    source: S.cfg.source.kind === 'monitor'
-      ? { kind: 'monitor', handle: S.cfg.source.handle }
-      : { kind: 'window', hwnd: S.cfg.source.handle },
+    source:
+      S.cfg.source.kind === 'monitor'
+        ? { kind: 'monitor', handle: S.cfg.source.handle }
+        : S.cfg.source.kind === 'webcam'
+          ? { kind: 'webcam', name: S.cfg.source.name }
+          : { kind: 'window', hwnd: S.cfg.source.handle },
     preset: S.cfg.preset,
     audio,
     volume: S.cfg.volume,
+    auto_quality: S.cfg.autoQuality,
   };
   $('btn-golive').disabled = true;
   $('home-status').textContent = 'Ligando a captura…';
@@ -438,6 +452,8 @@ async function goLive() {
   renderViewers();
   renderCross();
   show('live');
+  invoke('overlay_show').catch((e) => jsLog('warn', 'overlay: ' + e));
+  resetLiveIx();
 }
 
 $('btn-stop').addEventListener('click', stopLive);
@@ -509,6 +525,15 @@ listen('hub', ({ payload: ev }) => {
       $('t-kbps').textContent = (ev.kbps / 1000).toFixed(1) + ' Mbps';
       $('t-enc').textContent = ev.encoder;
       break;
+    case 'interaction':
+      onInteraction(ev.peer, ev.msg);
+      break;
+    case 'quality': {
+      const label = PRESETS[ev.preset] || ev.preset;
+      $('live-q').textContent = label;
+      toast(`Qualidade reduzida para ${label}: ${ev.reason}.`);
+      break;
+    }
     case 'error':
       toast(ev.message);
       $('live-status').textContent = ev.message;
@@ -524,6 +549,8 @@ function startWatching(peer) {
   stopWatching(null, true);
   const pc = new RTCPeerConnection({ iceServers: S.ice });
   const w = { peerId: peer.peerId, user: peer.user, pc, pendingIce: [], remoteSet: false, statsTimer: null, lastBytes: 0, lastTs: 0 };
+  pc.ondatachannel = (ev) => viewerChannel(w, ev.channel);
+  resetViewerIx();
   S.watch = w;
 
   const video = $('video');
@@ -534,8 +561,9 @@ function startWatching(peer) {
   pc.ontrack = (ev) => {
     stream.addTrack(ev.track);
     // Menor atraso possível no amigo
-    try { ev.receiver.playoutDelayHint = 0; } catch {}
-    try { ev.receiver.jitterBufferTarget = 0; } catch {}
+    // Uma folga pequena (150 ms) absorve as oscilações da internet sem atraso perceptível.
+    // Com zero, qualquer pacote atrasado virava quadro perdido (as "quedas de FPS").
+    try { ev.receiver.jitterBufferTarget = 150; } catch {}
     video.play().catch(() => {});
   };
   pc.onicecandidate = (ev) => {
@@ -572,7 +600,17 @@ function startWatching(peer) {
         w.lastTs = s.timestamp;
         const res = s.frameHeight ? `${s.frameHeight}p` : '—';
         const fps = s.framesPerSecond ? Math.round(s.framesPerSecond) + 'fps' : '';
-        $('watch-stats').textContent = `${res} · ${fps} · ${(kbps / 1000).toFixed(1)} Mbps`;
+        const got = (s.packetsReceived || 0) + (s.packetsLost || 0);
+        const lossPct = got ? (100 * (s.packetsLost || 0)) / got : 0;
+        $('watch-stats').textContent = `${res} · ${fps} · ${(kbps / 1000).toFixed(1)} Mbps` + (lossPct >= 0.5 ? ` · perda ${lossPct.toFixed(1)}%` : '');
+        // A cada 5 s, registra no diagnóstico o que dá pra saber de travadas
+        w.tick = (w.tick || 0) + 1;
+        if (w.tick % 5 === 0) {
+          const d = (k) => (s[k] || 0) - ((w.prev && w.prev[k]) || 0);
+          jsLog('info', `assistir: ${res} ${fps} ${(kbps / 1000).toFixed(1)}Mbps | perdidos +${d('packetsLost')} | quadros descartados +${d('framesDropped')} | congelou +${d('freezeCount')} (${d('totalFreezesDuration').toFixed(1)}s) | NACK +${d('nackCount')} | pedidos de imagem +${d('pliCount')} | jitter ${((s.jitter || 0) * 1000).toFixed(0)}ms | decoder ${s.decoderImplementation || '?'}`);
+          w.prev = { ...s };
+          logPair(pc);
+        }
       }
     });
   }, 1000);
@@ -622,6 +660,8 @@ function stopWatching(reason, switching) {
   if (!w) return;
   S.watch = null;
   clearInterval(w.statsTimer);
+  endControl(false);
+  resetViewerIx();
   sendSignal(w.peerId, { kind: 'leave' }, 'v');
   try { w.pc.close(); } catch {}
   $('video').srcObject = null;
@@ -671,10 +711,11 @@ async function refreshThumbs() {
   thumbsBusy = true;
   try {
     for (const s of S.sources) {
+      if (s.kind === 'webcam') continue;
       const url = await invoke('source_thumb', { kind: s.kind, handle: s.handle, w: 320, h: 180 }).catch(() => null);
       if (!url) continue;
       thumbs.set(s.handle, url);
-      const img = document.querySelector(`#sources img[data-handle="${s.handle}"]`);
+      const img = document.querySelector(`#sources img[data-handle="${CSS.escape(String(s.handle))}"]`);
       if (img) {
         img.src = url;
         img.hidden = false;
@@ -691,11 +732,31 @@ async function refreshPreview() {
   previewBusy = true;
   try {
     const s = S.cfg.source;
-    const url = await invoke('source_thumb', { kind: s.kind, handle: s.handle, w: 640, h: 360 }).catch(() => null);
+    let url;
+    if (s.kind === 'webcam') {
+      // Foto da câmera só quando escolhe (e guarda), pra não ficar ligando a câmera
+      url = thumbs.get(s.handle);
+      if (!url) {
+        $('preview-txt').hidden = false;
+        $('preview-img').hidden = true;
+        $('preview-txt').textContent = 'LIGANDO A CÂMERA…';
+        url = await invoke('webcam_thumb', { name: s.name }).catch(() => null);
+        if (url) {
+          thumbs.set(s.handle, url);
+          const img = document.querySelector(`#sources img[data-handle="${CSS.escape(String(s.handle))}"]`);
+          if (img) {
+            img.src = url;
+            img.hidden = false;
+          }
+        }
+      }
+    } else {
+      url = await invoke('source_thumb', { kind: s.kind, handle: s.handle, w: 640, h: 360 }).catch(() => null);
+    }
     if (S.cfg.source !== s) return;
     $('preview-img').hidden = !url;
     $('preview-txt').hidden = !!url;
-    $('preview-txt').textContent = url ? '' : 'SEM PRÉVIA (janela minimizada?)';
+    $('preview-txt').textContent = url ? '' : s.kind === 'webcam' ? 'CÂMERA SEM IMAGEM (em uso por outro programa?)' : 'SEM PRÉVIA (janela minimizada?)';
     if (url) $('preview-img').src = url;
   } finally {
     previewBusy = false;
@@ -736,5 +797,450 @@ function tryPendingWatch() {
 
 listen('open-url', ({ payload }) => onOpenUrl(payload));
 invoke('take_pending_url').then(onOpenUrl).catch(() => {});
+
+// =====================================================================
+// INTERAÇÃO: reações, ping, clipa isso, controle remoto
+// =====================================================================
+
+const fxEmit = (msg) => {
+  try {
+    T && T.event.emitTo('overlay', 'fx', msg);
+  } catch (e) {
+    jsLog('warn', 'fx: ' + e);
+  }
+};
+const nameOf = (peer) => (S.viewers.get(peer) && S.viewers.get(peer).user && S.viewers.get(peer).user.name) || 'amigo';
+const myName = () => (S.me && S.me.user && S.me.user.name) || 'eu';
+
+// ---------- quem assiste ----------
+
+const VX = { dc: null, kind: null, canCtl: false, pinging: false, controlling: false, waitingCtl: false, clipCooldown: 0, lastMove: 0, held: new Set() };
+
+function resetViewerIx() {
+  VX.dc = null;
+  VX.kind = null;
+  VX.canCtl = false;
+  VX.waitingCtl = false;
+  setPinging(false);
+  $('ixbar').hidden = true;
+  $('ix-hint').hidden = true;
+  STARFX.banner($('player'), '');
+}
+
+// Botões de reação (montados uma vez)
+$('ix-reacts').replaceChildren(
+  ...Object.entries(STARFX.REACTIONS).map(([k, r]) => {
+    const b = el('button', { class: 'ix-react', type: 'button', title: r.label, 'aria-label': r.label });
+    b.style.setProperty('--c', r.c);
+    b.innerHTML = r.icon + `<span>${r.label}</span>`;
+    b.addEventListener('click', () => sendReact(k));
+    return b;
+  }),
+);
+
+function vsend(msg) {
+  if (VX.dc && VX.dc.readyState === 'open') VX.dc.send(JSON.stringify(msg));
+}
+
+function viewerChannel(w, dc) {
+  VX.dc = dc;
+  dc.onopen = () => {
+    if (S.watch !== w) return;
+    $('ixbar').hidden = false;
+    vsend({ t: 'hi' });
+  };
+  dc.onclose = () => {
+    if (S.watch === w) resetViewerIx();
+  };
+  dc.onmessage = (ev) => {
+    let m;
+    try { m = JSON.parse(ev.data); } catch { return; }
+    onViewerMsg(m);
+  };
+}
+
+function onViewerMsg(m) {
+  const player = $('player');
+  const mine = S.me && m.by === S.me.peerId;
+  switch (m.t) {
+    case 'hello':
+      VX.kind = m.kind;
+      VX.canCtl = !!m.ctl;
+      $('ix-ping').disabled = m.kind === 'webcam';
+      $('ix-ctl').disabled = !m.ctl;
+      $('ix-ctl').title = m.ctl ? 'Pedir pra controlar o mouse e o teclado de quem transmite' : 'Quem transmite não está aceitando controle remoto';
+      break;
+    case 'react':
+      if (!mine) STARFX.react(player, m.e, m.name);
+      break;
+    case 'ping':
+      if (!mine) STARFX.ping(player, m.x, m.y, m.name, contentBox());
+      break;
+    case 'clipped':
+      STARFX.flash(player, 'CLIP SALVO', `pedido por ${m.name}`);
+      break;
+    case 'clip-fail':
+      toast('Não deu pra clipar: ' + (m.msg || 'erro'));
+      break;
+    case 'ctl':
+      if (m.state === 'granted') startControl(m.minutes);
+      else {
+        VX.waitingCtl = false;
+        endControl(false);
+        if (m.state === 'denied') toast('Pedido de controle recusado' + (m.reason ? `: ${m.reason}` : '.'));
+        if (m.state === 'revoked') toast('Controle encerrado' + (m.reason ? `: ${m.reason}` : '.'));
+      }
+      renderCtlBtn();
+      break;
+  }
+}
+
+/** Área do vídeo de verdade dentro do player (sem as faixas pretas). */
+function contentBox() {
+  const v = $('video');
+  const pw = $('player').clientWidth;
+  const ph = $('player').clientHeight;
+  const vw = v.videoWidth || 16;
+  const vh = v.videoHeight || 9;
+  const scale = Math.min(pw / vw, ph / vh);
+  const width = vw * scale;
+  const height = vh * scale;
+  return { left: (pw - width) / 2, top: (ph - height) / 2, width, height };
+}
+
+/** Posição do ponteiro em 0..1 dentro do vídeo, ou null se estiver nas faixas pretas. */
+function videoPoint(e) {
+  const r = $('player').getBoundingClientRect();
+  const b = contentBox();
+  const x = (e.clientX - r.left - b.left) / b.width;
+  const y = (e.clientY - r.top - b.top) / b.height;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  return { x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000 };
+}
+
+let reactTimes = [];
+function sendReact(kind) {
+  const now = Date.now();
+  reactTimes = reactTimes.filter((t) => now - t < 2000);
+  if (reactTimes.length >= 6) return; // anti-spam
+  reactTimes.push(now);
+  STARFX.react($('player'), kind, myName());
+  vsend({ t: 'react', e: kind });
+}
+
+function setPinging(on) {
+  VX.pinging = on && !VX.controlling && VX.kind !== 'webcam';
+  $('ix-ping').setAttribute('aria-pressed', VX.pinging ? 'true' : 'false');
+  $('player').classList.toggle('pinging', VX.pinging);
+  if (VX.pinging) hint('MODO PING: clique no vídeo pra marcar · P ou ESC sai');
+  else if (!VX.controlling) $('ix-hint').hidden = true;
+}
+function hint(t) {
+  $('ix-hint').textContent = t;
+  $('ix-hint').hidden = false;
+}
+$('ix-ping').addEventListener('click', () => setPinging(!VX.pinging));
+
+$('player').addEventListener('click', (e) => {
+  if (!VX.pinging) return;
+  const p = videoPoint(e);
+  if (!p) return;
+  STARFX.ping($('player'), p.x, p.y, myName(), contentBox());
+  vsend({ t: 'ping', x: p.x, y: p.y });
+});
+
+$('ix-clip').addEventListener('click', () => {
+  if (Date.now() < VX.clipCooldown) return;
+  VX.clipCooldown = Date.now() + 10000;
+  vsend({ t: 'clip' });
+  const b = $('ix-clip');
+  b.disabled = true;
+  setTimeout(() => (b.disabled = false), 10000);
+});
+
+function renderCtlBtn() {
+  const b = $('ix-ctl');
+  b.classList.toggle('on', VX.controlling);
+  $('ix-ctl-txt').textContent = VX.controlling ? 'SOLTAR CONTROLE' : VX.waitingCtl ? 'AGUARDANDO…' : 'PEDIR CONTROLE';
+  b.disabled = !VX.canCtl && !VX.controlling;
+}
+$('ix-ctl').addEventListener('click', () => {
+  if (VX.controlling) {
+    vsend({ t: 'ctl-release' });
+    endControl(false);
+  } else if (!VX.waitingCtl) {
+    VX.waitingCtl = true;
+    vsend({ t: 'ctl-req' });
+    setTimeout(() => {
+      if (VX.waitingCtl) {
+        VX.waitingCtl = false;
+        renderCtlBtn();
+      }
+    }, 25000);
+  }
+  renderCtlBtn();
+});
+
+function startControl(minutes) {
+  VX.waitingCtl = false;
+  VX.controlling = true;
+  setPinging(false);
+  $('player').classList.add('controlling');
+  STARFX.banner($('player'), 'VOCÊ ESTÁ NO CONTROLE', `${minutes} MIN · CTRL+ALT+X SOLTA`);
+  hint('Mouse e teclado vão pro PC de quem transmite enquanto o ponteiro estiver no vídeo.');
+  $('player').focus();
+  renderCtlBtn();
+}
+
+function endControl(notify) {
+  if (!VX.controlling) return;
+  for (const vk of VX.held) vsend({ t: 'in', k: 'ku', vk });
+  VX.held.clear();
+  VX.controlling = false;
+  $('player').classList.remove('controlling');
+  STARFX.banner($('player'), '');
+  $('ix-hint').hidden = true;
+  if (notify) vsend({ t: 'ctl-release' });
+  renderCtlBtn();
+}
+
+// Mouse e teclado enquanto controla
+$('player').tabIndex = 0;
+$('player').addEventListener('pointermove', (e) => {
+  if (!VX.controlling) return;
+  const now = performance.now();
+  if (now - VX.lastMove < 16) return; // ~60 por segundo
+  VX.lastMove = now;
+  const p = videoPoint(e);
+  if (p) vsend({ t: 'in', k: 'm', x: p.x, y: p.y });
+});
+$('player').addEventListener('pointerdown', (e) => {
+  if (!VX.controlling) return;
+  e.preventDefault();
+  $('player').focus();
+  const p = videoPoint(e);
+  if (p) vsend({ t: 'in', k: 'd', b: e.button, x: p.x, y: p.y });
+});
+$('player').addEventListener('pointerup', (e) => {
+  if (!VX.controlling) return;
+  const p = videoPoint(e) || {};
+  vsend({ t: 'in', k: 'u', b: e.button, x: p.x, y: p.y });
+});
+$('player').addEventListener('wheel', (e) => {
+  if (!VX.controlling) return;
+  e.preventDefault();
+  vsend({ t: 'in', k: 'w', dy: e.deltaY });
+}, { passive: false });
+$('player').addEventListener('contextmenu', (e) => {
+  if (VX.controlling) e.preventDefault();
+});
+$('player').addEventListener('dblclick', (e) => {
+  if (VX.controlling || VX.pinging) e.stopImmediatePropagation();
+}, true);
+
+window.addEventListener('keydown', (e) => {
+  if ($('screen-watch').hidden) return;
+  // Ctrl+Alt+X: solta o controle
+  if (VX.controlling && e.ctrlKey && e.altKey && e.code === 'KeyX') {
+    e.preventDefault();
+    endControl(true);
+    return;
+  }
+  if (VX.controlling) {
+    e.preventDefault();
+    if (!e.repeat) VX.held.add(e.keyCode);
+    vsend({ t: 'in', k: 'kd', vk: e.keyCode });
+    return;
+  }
+  if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+  if (e.code === 'KeyP' && !$('ixbar').hidden) setPinging(!VX.pinging);
+  if (e.code === 'Escape' && VX.pinging) setPinging(false);
+}, true);
+window.addEventListener('keyup', (e) => {
+  if (!VX.controlling) return;
+  e.preventDefault();
+  VX.held.delete(e.keyCode);
+  vsend({ t: 'in', k: 'ku', vk: e.keyCode });
+}, true);
+window.addEventListener('blur', () => {
+  // Saiu da janela com tecla apertada: solta tudo no PC do outro
+  for (const vk of VX.held) vsend({ t: 'in', k: 'ku', vk });
+  VX.held.clear();
+});
+
+// ---------- quem transmite ----------
+
+const LX = { clipBusy: false, lastClip: 0, reactRate: new Map(), pending: null, ctlPeer: null, ctlUntil: 0, timer: null };
+
+const allowCtlInit = store.get('allowCtl') !== '0';
+$('allow-ctl').checked = allowCtlInit;
+$('allow-ctl').addEventListener('change', (e) => store.set('allowCtl', e.target.checked ? '1' : '0'));
+
+function resetLiveIx() {
+  LX.pending = null;
+  LX.ctlPeer = null;
+  $('ctl-state').hidden = true;
+  $('ctl-modal').hidden = true;
+  $('ix-feed').replaceChildren(el('li', { class: 'dim' }, 'Reações, pings e clipes da galera aparecem aqui.'));
+}
+
+function feed(kind, text) {
+  const ul = $('ix-feed');
+  const first = ul.firstElementChild;
+  if (first && first.classList.contains('dim')) first.remove();
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+  ul.prepend(el('li', {}, el('span', { class: 'k' }, kind), el('span', { class: 'grow' }, text), el('span', { class: 'dim' }, hh)));
+  while (ul.children.length > 30) ul.lastChild.remove();
+}
+
+const bcast = (msg) => invoke('hub_broadcast', { msg }).catch(() => {});
+const sendTo = (peer, msg) => invoke('hub_send', { peer, msg }).catch(() => {});
+
+function onInteraction(peer, m) {
+  if (!S.live || !m || typeof m.t !== 'string') return;
+  const name = nameOf(peer);
+  const webcam = S.cfg.source && S.cfg.source.kind === 'webcam';
+  switch (m.t) {
+    case 'hi':
+      sendTo(peer, { t: 'hello', kind: S.cfg.source ? S.cfg.source.kind : 'monitor', ctl: $('allow-ctl').checked && !webcam });
+      break;
+    case 'react': {
+      if (!STARFX.REACTIONS[m.e]) return;
+      const now = Date.now();
+      const times = (LX.reactRate.get(peer) || []).filter((t) => now - t < 2000);
+      if (times.length >= 6) return;
+      times.push(now);
+      LX.reactRate.set(peer, times);
+      STARFX.react(document.querySelector('#screen-live .stage'), m.e, name);
+      fxEmit({ t: 'react', e: m.e, name });
+      bcast({ t: 'react', e: m.e, by: peer, name });
+      feed('REAÇÃO', `${name} · ${STARFX.REACTIONS[m.e].label}`);
+      break;
+    }
+    case 'ping': {
+      if (webcam) return;
+      const x = Math.min(1, Math.max(0, Number(m.x) || 0));
+      const y = Math.min(1, Math.max(0, Number(m.y) || 0));
+      fxEmit({ t: 'ping', x, y, name });
+      STARFX.ping(document.querySelector('#screen-live .stage'), x, y, name);
+      bcast({ t: 'ping', x, y, by: peer, name });
+      feed('PING', name);
+      break;
+    }
+    case 'clip':
+      doClip(name, peer);
+      break;
+    case 'ctl-req':
+      onCtlRequest(peer, name);
+      break;
+    case 'ctl-release':
+      if (LX.ctlPeer === peer) invoke('remote_revoke', { reason: `${name} soltou o controle` }).catch(() => {});
+      break;
+  }
+}
+
+function stamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+}
+
+async function doClip(name, peer) {
+  if (LX.clipBusy || Date.now() - LX.lastClip < 10000) {
+    if (peer) sendTo(peer, { t: 'clip-fail', msg: 'acabaram de clipar, espera uns segundos' });
+    return;
+  }
+  LX.clipBusy = true;
+  LX.lastClip = Date.now();
+  try {
+    const slug = String(name).normalize('NFD').replace(/[^\w-]+/g, '').slice(0, 24) || 'amigo';
+    const path = await invoke('clip_save', { name: `clip_${stamp()}_${slug}` });
+    feed('CLIPE', `${name} clipou · salvo`);
+    fxEmit({ t: 'flash', text: 'CLIP SALVO', sub: `pedido por ${name}` });
+    STARFX.flash(document.querySelector('#screen-live .stage'), 'CLIP SALVO', `pedido por ${name}`);
+    bcast({ t: 'clipped', name });
+    jsLog('info', 'clipe: ' + path);
+  } catch (e) {
+    feed('CLIPE', `falhou: ${e}`);
+    if (peer) sendTo(peer, { t: 'clip-fail', msg: String(e) });
+    else toast('Não deu pra clipar: ' + e);
+  } finally {
+    LX.clipBusy = false;
+  }
+}
+$('btn-my-clip').addEventListener('click', () => doClip(myName(), null));
+$('btn-clips').addEventListener('click', () => invoke('open_clips_folder').catch((e) => toast('Não abriu: ' + e)));
+
+function onCtlRequest(peer, name) {
+  const webcam = S.cfg.source && S.cfg.source.kind === 'webcam';
+  const deny = (reason) => sendTo(peer, { t: 'ctl', state: 'denied', reason });
+  if (!$('allow-ctl').checked) return deny('controle remoto desligado');
+  if (webcam) return deny('transmitindo a webcam');
+  if (LX.ctlPeer) return deny('outra pessoa já está no controle');
+  if (LX.pending) return deny('já tem um pedido aberto');
+  feed('CONTROLE', `${name} pediu o controle`);
+  let left = 20;
+  LX.pending = { peer, name, timer: null };
+  $('ctl-name').textContent = name;
+  const u = S.viewers.get(peer) && S.viewers.get(peer).user;
+  if (u && u.avatar) $('ctl-avatar').src = u.avatar;
+  else $('ctl-avatar').removeAttribute('src');
+  $('ctl-count').textContent = left + 's';
+  $('ctl-modal').hidden = false;
+  $('ctl-5').focus();
+  LX.pending.timer = setInterval(() => {
+    left -= 1;
+    $('ctl-count').textContent = left + 's';
+    if (left <= 0) answerCtl(0);
+  }, 1000);
+}
+
+async function answerCtl(minutes) {
+  const p = LX.pending;
+  if (!p) return;
+  clearInterval(p.timer);
+  LX.pending = null;
+  $('ctl-modal').hidden = true;
+  if (!minutes) {
+    sendTo(p.peer, { t: 'ctl', state: 'denied', reason: 'recusado' });
+    feed('CONTROLE', `pedido de ${p.name} recusado`);
+    return;
+  }
+  try {
+    await invoke('remote_grant', { peer: p.peer, minutes });
+  } catch (e) {
+    sendTo(p.peer, { t: 'ctl', state: 'denied', reason: String(e) });
+    return toast('Não deu pra liberar: ' + e);
+  }
+  LX.ctlPeer = p.peer;
+  LX.ctlUntil = Date.now() + minutes * 60000;
+  sendTo(p.peer, { t: 'ctl', state: 'granted', minutes });
+  fxEmit({ t: 'banner', text: `${p.name.toUpperCase()} ESTÁ NO CONTROLE`, sub: 'CTRL+ALT+X CORTA' });
+  feed('CONTROLE', `${p.name} no controle por ${minutes} min`);
+  $('ctl-who').textContent = p.name.toUpperCase();
+  $('ctl-state').hidden = false;
+  clearInterval(LX.timer);
+  LX.timer = setInterval(() => {
+    const s = Math.max(0, Math.round((LX.ctlUntil - Date.now()) / 1000));
+    $('ctl-left').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }, 500);
+}
+$('ctl-5').addEventListener('click', () => answerCtl(5));
+$('ctl-15').addEventListener('click', () => answerCtl(15));
+$('ctl-no').addEventListener('click', () => answerCtl(0));
+$('btn-ctl-cut').addEventListener('click', () => invoke('remote_revoke', { reason: 'quem transmite cortou' }).catch(() => {}));
+
+listen('remote-ended', ({ payload }) => {
+  const { peer, reason } = payload || {};
+  if (peer) sendTo(peer, { t: 'ctl', state: 'revoked', reason });
+  if (LX.ctlPeer === peer || !peer) {
+    LX.ctlPeer = null;
+    clearInterval(LX.timer);
+    $('ctl-state').hidden = true;
+    fxEmit({ t: 'banner', text: '' });
+    feed('CONTROLE', `encerrado: ${reason || ''}`);
+  }
+});
 
 initLogin();

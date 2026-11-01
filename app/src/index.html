@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="fx.css">
 </head>
 <body>
 
@@ -14,6 +15,9 @@
   <symbol id="star" viewBox="0 0 40 40"><polygon points="20,2 24,16 38,20 24,24 20,38 16,24 2,20 16,16" fill="none" stroke="currentColor" stroke-width="2"/><rect x="17" y="17" width="6" height="6" fill="currentColor"/></symbol>
   <symbol id="lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
   <symbol id="vol" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+  <symbol id="crosshair" viewBox="0 0 24 24"><path d="M12 2v6M12 16v6M2 12h6M16 12h6" fill="none" stroke="currentColor" stroke-width="2"/><rect x="10" y="10" width="4" height="4" transform="rotate(45 12 12)" fill="currentColor"/></symbol>
+  <symbol id="clip" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 10l5-3v10l-5-3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="7" cy="10" r="1.5" fill="currentColor"/></symbol>
+  <symbol id="mouse" viewBox="0 0 24 24"><path d="M6 3l12 9-5 1 3 7-3 1-3-7-4 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="miter"/></symbol>
   <symbol id="full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
 </svg>
 
@@ -83,6 +87,7 @@
             <button class="opt" data-preset="equilibrada"><b class="caps">EQUILIBRADA</b><span class="mono">1080p · 60fps · 10 Mbps</span></button>
             <button class="opt" data-preset="maxima"><b class="caps">MÁXIMA</b><span class="mono">1440p · 60fps · 15 Mbps</span></button>
           </div>
+          <label class="check"><input id="auto-quality" type="checkbox"> Baixar a qualidade sozinho se alguém estiver travando</label>
           <span class="mono dim tiny" id="encoder-line">ENCODER: DETECTANDO…</span>
         </section>
       </div>
@@ -148,6 +153,20 @@
           <div class="panel-head mono"><span>OUTRAS LIVES</span><span></span></div>
           <div id="live-list-2" class="live-list single pad"></div>
         </div>
+        <div class="panel">
+          <div class="panel-head mono"><span>INTERAÇÃO</span><button class="link mono tiny" id="btn-clips">CLIPES ›</button></div>
+          <div class="pad ixlive">
+            <div class="ctl-state mono small" id="ctl-state" hidden>
+              <span><i class="sq pulse"></i> <b id="ctl-who">—</b> NO CONTROLE · <span id="ctl-left">—</span></span>
+              <button class="btn-outline small-btn" id="btn-ctl-cut">CORTAR (Ctrl+Alt+X)</button>
+            </div>
+            <div class="ix-actions">
+              <button class="ix-btn" id="btn-my-clip"><svg class="ico"><use href="#clip"/></svg><span>CLIPAR AGORA</span></button>
+            </div>
+            <label class="check"><input id="allow-ctl" type="checkbox"> Aceitar pedidos de controle remoto</label>
+            <ul class="feed mono" id="ix-feed"><li class="dim">Reações, pings e clipes da galera aparecem aqui.</li></ul>
+          </div>
+        </div>
         <button id="btn-stop" class="btn-outline">ENCERRAR</button>
         <p id="live-status" class="mono small acc" role="status"></p>
       </aside>
@@ -178,10 +197,38 @@
       <span class="mono dim small grow" id="watch-stats">—</span>
       <button id="btn-full" class="icon-btn" aria-label="Tela cheia"><svg class="ico"><use href="#full"/></svg></button>
     </div>
+    <div class="ixbar" id="ixbar" hidden>
+      <div class="ix-reacts" id="ix-reacts" role="group" aria-label="Reações"></div>
+      <div class="ix-sep"></div>
+      <button id="ix-ping" class="ix-btn" aria-pressed="false" title="Clique no vídeo pra marcar um ponto na tela de quem transmite (atalho: P)"><svg class="ico"><use href="#crosshair"/></svg><span>PING</span></button>
+      <button id="ix-clip" class="ix-btn" title="Salva os últimos 30 s no PC de quem transmite"><svg class="ico"><use href="#clip"/></svg><span>CLIPA ISSO</span></button>
+      <button id="ix-ctl" class="ix-btn" title="Pedir pra controlar o mouse e o teclado de quem transmite"><svg class="ico"><use href="#mouse"/></svg><span id="ix-ctl-txt">PEDIR CONTROLE</span></button>
+    </div>
+    <p class="mono tiny dim ix-hint" id="ix-hint" hidden></p>
   </div>
 </section>
 
+<!-- Pedido de controle remoto (quem transmite) -->
+<div class="modal-back" id="ctl-modal" hidden>
+  <div class="modal chamfer-big" role="dialog" aria-modal="true" aria-labelledby="ctl-title">
+    <div class="panel-head mono"><span>PEDIDO DE CONTROLE REMOTO</span><span class="acc" id="ctl-count">20s</span></div>
+    <div class="modal-body">
+      <img id="ctl-avatar" alt="">
+      <div>
+        <h3 id="ctl-title"><b id="ctl-name">—</b> quer controlar seu mouse e teclado</h3>
+        <p class="dim small">Só dentro do que você está transmitindo. Você pode cortar a qualquer momento com <b class="acc">Ctrl+Alt+X</b>. A tecla Windows fica bloqueada.</p>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-primary chamfer" id="ctl-5">PERMITIR 5 MIN</button>
+      <button class="btn-outline" id="ctl-15">15 MIN</button>
+      <button class="btn-ghost chip" id="ctl-no">RECUSAR</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast mono" role="alert" hidden></div>
+<script src="fx.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

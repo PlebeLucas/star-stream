@@ -7,7 +7,9 @@
 //! - `sources`: monitores e janelas disponíveis
 
 pub mod audio;
+pub mod clip;
 pub mod hub;
+pub mod remote;
 pub mod session;
 pub mod sources;
 pub mod video;

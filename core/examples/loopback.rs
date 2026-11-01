@@ -26,16 +26,20 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<HubEvent>();
     let hub = Hub::new(vec![], ev_tx)?;
-    let port = hub.start_video_ingest().await?;
+    let port = hub.start_video_ingest(4000).await?;
 
     // "FFmpeg" com padrão de teste no lugar da tela
-    let mut ff = tokio::process::Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30"])
-        .args(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-bf", "0", "-profile:v", "high"])
-        .args(["-b:v", "4000k", "-g", "60", "-bsf:v", "dump_extra=freq=keyframe", "-f", "rtp", "-payload_type", "96"])
-        .arg(format!("rtp://127.0.0.1:{port}?pkt_size=1200"))
-        .kill_on_drop(true)
-        .spawn()?;
+    let spawn_ff = |size: &str| {
+        tokio::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size={size}:rate=30"))
+            .args(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-bf", "0", "-profile:v", "high"])
+            .args(["-b:v", "4000k", "-g", "60", "-bsf:v", "dump_extra=freq=keyframe", "-f", "rtp", "-payload_type", "96"])
+            .arg(format!("rtp://127.0.0.1:{port}?pkt_size=1200"))
+            .kill_on_drop(true)
+            .spawn()
+    };
+    let mut ff = spawn_ff("1280x720")?;
 
     // Áudio: senoide de 440 Hz em Opus
     {
@@ -93,6 +97,32 @@ async fn main() -> anyhow::Result<()> {
             Box::pin(async {})
         }));
     }
+    // Canal de interação do lado de quem assiste
+    let (dc_tx, mut dc_rx) = mpsc::unbounded_channel::<Arc<webrtc::data_channel::RTCDataChannel>>();
+    let got_back = Arc::new(AtomicU64::new(0));
+    {
+        let got_back = got_back.clone();
+        viewer.on_data_channel(Box::new(move |dc| {
+            let dc_tx = dc_tx.clone();
+            let got_back = got_back.clone();
+            Box::pin(async move {
+                println!("amigo abriu o canal de interação: {}", dc.label());
+                dc.on_message(Box::new(move |m| {
+                    let txt = String::from_utf8_lossy(&m.data).to_string();
+                    if txt.contains("\"react\"") {
+                        got_back.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Box::pin(async {})
+                }));
+                let d2 = dc.clone();
+                dc.on_open(Box::new(move || {
+                    let _ = dc_tx.send(d2.clone());
+                    Box::pin(async {})
+                }));
+            })
+        }));
+    }
+    let mut interactions = 0u32;
     let (vice_tx, mut vice_rx) = mpsc::unbounded_channel();
     viewer.on_ice_candidate(Box::new(move |c| {
         let tx = vice_tx.clone();
@@ -105,9 +135,20 @@ async fn main() -> anyhow::Result<()> {
 
     hub.on_signal("amigo", Signal::Join).await?;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let restart_at = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut restarted = false;
+    let mut v_at_restart = 0u64;
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(restart_at), if !restarted => {
+                // Simula a troca de qualidade: FFmpeg novo, outra resolução, numeração nova
+                restarted = true;
+                let _ = ff.kill().await;
+                v_at_restart = vbytes.load(Ordering::Relaxed);
+                ff = spawn_ff("640x360")?;
+                println!("FFmpeg reiniciado em 640x360 (recebido até aqui: {} KB)", v_at_restart / 1024);
+            }
             Some(ev) = ev_rx.recv() => match ev {
                 HubEvent::Signal { data: Signal::Offer { sdp }, .. } => {
                     if std::env::var("SDP").is_ok() { println!("OFFER:\n{}", sdp); }
@@ -119,9 +160,20 @@ async fn main() -> anyhow::Result<()> {
                 }
                 HubEvent::Signal { data: Signal::Ice { candidate }, .. } => { viewer.add_ice_candidate(candidate).await?; }
                 HubEvent::ViewerState { state, .. } => println!("conexão: {state}"),
+                HubEvent::Interaction { peer, msg } => {
+                    println!("interação de {peer}: {msg}");
+                    interactions += 1;
+                    let mut out = msg.clone();
+                    out["by"] = serde_json::json!(peer);
+                    hub.broadcast(&out).await;
+                }
                 _ => {}
             },
             Some(c) = vice_rx.recv() => { let _ = hub.on_signal("amigo", Signal::Ice { candidate: c }).await; }
+            Some(dc) = dc_rx.recv() => {
+                dc.send_text(r#"{"t":"react","e":"fire"}"#).await?;
+                dc.send_text(r#"{"t":"ping","x":0.5,"y":0.25}"#).await?;
+            }
             _ = tokio::time::sleep_until(deadline) => break,
         }
     }
@@ -136,7 +188,30 @@ async fn main() -> anyhow::Result<()> {
     let a = abytes.load(Ordering::Relaxed);
     println!("vídeo recebido: {} KB, áudio recebido: {} KB", v / 1024, a / 1024);
     let _ = ff.kill().await;
-    if v > 100 * 1024 && a > 10 * 1024 {
+    // Clipe dos últimos 4 s
+    let clip = std::env::temp_dir().join("star-clip-teste.mp4");
+    let _ = std::fs::remove_file(&clip);
+    match hub.save_clip(std::path::Path::new("ffmpeg"), 30, 4, &clip).await {
+        Ok(()) => {
+            let probe = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,duration", "-of", "compact"])
+                .arg(&clip)
+                .output()?;
+            println!("clipe: {}", String::from_utf8_lossy(&probe.stdout).replace('\n', " | "));
+        }
+        Err(e) => println!("clipe falhou: {e}"),
+    }
+    println!("interações recebidas: {interactions}, reações devolvidas ao amigo: {}", got_back.load(Ordering::Relaxed));
+    let after = v - v_at_restart;
+    println!("vídeo depois da troca: {} KB", after / 1024);
+    let clip_ok = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0"])
+        .arg(&clip)
+        .output()
+        .map(|o| { let t = String::from_utf8_lossy(&o.stdout).to_string(); t.contains("video") && t.contains("audio") })
+        .unwrap_or(false);
+    println!("clipe com vídeo e áudio: {clip_ok}");
+    if v > 100 * 1024 && a > 10 * 1024 && after > 100 * 1024 && clip_ok && interactions >= 2 && got_back.load(Ordering::Relaxed) >= 1 {
         println!("OK: vídeo e áudio chegaram do outro lado");
         Ok(())
     } else {
